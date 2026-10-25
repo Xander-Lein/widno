@@ -1,7 +1,10 @@
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        mpsc::{self, Receiver},
+        Arc,
+    },
     thread,
 };
 
@@ -31,6 +34,42 @@ pub enum ZoomMode {
     Step(f32),
 }
 
+pub const ZOOM_STEP: f32 = 0.25;
+
+pub fn zoom_step(current: f32, direction: i32) -> f32 {
+    let current = current.clamp(0.05, 32.0);
+    (current + ZOOM_STEP * direction.signum() as f32).clamp(0.05, 32.0)
+}
+
+pub fn zoom_pan_for_cursor(
+    pan: (f32, f32),
+    current_zoom: f32,
+    new_zoom: f32,
+    cursor: (f32, f32),
+    viewport_center: (f32, f32),
+) -> (f32, f32) {
+    let ratio = new_zoom / current_zoom.max(0.0001);
+    (
+        (cursor.0 - viewport_center.0) * (1.0 - ratio) + pan.0 * ratio,
+        (cursor.1 - viewport_center.1) * (1.0 - ratio) + pan.1 * ratio,
+    )
+}
+
+pub fn pan_for_drag(
+    start_pan: (f32, f32),
+    pointer_start: (f32, f32),
+    pointer_current: (f32, f32),
+) -> (f32, f32) {
+    (
+        start_pan.0 + pointer_current.0 - pointer_start.0,
+        start_pan.1 + pointer_current.1 - pointer_start.1,
+    )
+}
+
+pub fn reset_view() -> ((f32, f32), f32) {
+    ((0.0, 0.0), 1.0)
+}
+
 impl ZoomMode {
     pub fn factor(self) -> f32 {
         match self {
@@ -44,7 +83,9 @@ impl ZoomMode {
 #[derive(Debug, Clone)]
 pub struct LoadedImage {
     pub source: PathBuf,
-    pub image: DynamicImage,
+    pub image: Arc<DynamicImage>,
+    pub archive_entry: Option<archive::ArchiveEntry>,
+    pub archive_entries: Option<Vec<archive::ArchiveEntry>>,
 }
 
 pub fn is_supported_image_path(path: &Path) -> bool {
@@ -121,7 +162,9 @@ pub fn load_image(path: impl Into<PathBuf>) -> Result<LoadedImage, ViewerError> 
 
     Ok(LoadedImage {
         source: path,
-        image,
+        image: Arc::new(image),
+        archive_entry: None,
+        archive_entries: None,
     })
 }
 
@@ -135,7 +178,7 @@ pub fn load_path_with_password(
 ) -> Result<LoadedImage, ViewerError> {
     let path = path.into();
 
-    if let Some(kind) = archive::archive_kind(&path) {
+    if archive::archive_kind(&path).is_some() {
         let entries = archive::image_entries(&path, password)
             .map_err(|error| ViewerError::Message(error.to_string()))?;
         let entry = entries
@@ -145,8 +188,10 @@ pub fn load_path_with_password(
             .map_err(|error| ViewerError::Message(error.to_string()))?;
         validate_image_size(&image)?;
         return Ok(LoadedImage {
-            source: PathBuf::from(format!("{}::{:?}", path.display(), kind)),
-            image,
+            source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
+            image: Arc::new(image),
+            archive_entry: Some(entry.clone()),
+            archive_entries: Some(entries),
         });
     }
 
@@ -156,7 +201,9 @@ pub fn load_path_with_password(
         validate_image_size(&image)?;
         return Ok(LoadedImage {
             source: path,
-            image,
+            image: Arc::new(image),
+            archive_entry: None,
+            archive_entries: None,
         });
     }
 
@@ -166,7 +213,9 @@ pub fn load_path_with_password(
         validate_image_size(&image)?;
         return Ok(LoadedImage {
             source: path,
-            image,
+            image: Arc::new(image),
+            archive_entry: None,
+            archive_entries: None,
         });
     }
 
@@ -198,6 +247,29 @@ pub fn load_image_async_with_password(
     receiver
 }
 
+pub fn load_archive_entry_async(
+    path: PathBuf,
+    entry: archive::ArchiveEntry,
+    password: Option<String>,
+) -> Receiver<Result<LoadedImage, ViewerError>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = archive::load_image_entry(&path, &entry.name, password.as_deref())
+            .map_err(|error| ViewerError::Message(error.to_string()))
+            .and_then(|image| {
+                validate_image_size(&image)?;
+                Ok(LoadedImage {
+                    source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
+                    image: Arc::new(image),
+                    archive_entry: Some(entry),
+                    archive_entries: None,
+                })
+            });
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
 pub fn load_pdf_page_async(
     path: PathBuf,
     page_index: usize,
@@ -210,7 +282,9 @@ pub fn load_pdf_page_async(
                 validate_image_size(&image)?;
                 Ok(LoadedImage {
                     source: path,
-                    image,
+                    image: Arc::new(image),
+                    archive_entry: None,
+                    archive_entries: None,
                 })
             });
         let _ = sender.send(result);

@@ -31,6 +31,19 @@ fn imported_rar_fixture_is_byte_identical_and_readable() {
 }
 
 #[test]
+fn loads_an_image_from_any_supported_archive_index() {
+    let path = fixture_root().join("archives").join("фотки.rar");
+    let entries = archive::image_entries(&path, None).expect("list archive images");
+    assert!(entries.len() > 1);
+
+    let (entry, image) =
+        archive::load_image_entry_at(&path, 1, None).expect("load second archive image");
+    assert_eq!(entry.name, entries[1].name);
+    assert!(image.width() > 0);
+    assert!(image.height() > 0);
+}
+
+#[test]
 fn common_image_formats_round_trip_through_viewer_loader() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let image = RgbaImage::from_pixel(4, 3, Rgba([24, 80, 160, 255]));

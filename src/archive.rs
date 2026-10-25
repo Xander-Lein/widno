@@ -171,6 +171,19 @@ pub fn load_image_entry(
     Ok(reader.decode()?)
 }
 
+pub fn load_image_entry_at(
+    archive_path: &Path,
+    index: usize,
+    password: Option<&str>,
+) -> Result<(ArchiveEntry, image::DynamicImage)> {
+    let entry = image_entries(archive_path, password)?
+        .into_iter()
+        .nth(index)
+        .ok_or_else(|| anyhow!("archive image index out of range: {index}"))?;
+    let image = load_image_entry(archive_path, &entry.name, password)?;
+    Ok((entry, image))
+}
+
 pub fn image_entries(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>> {
     Ok(list_entries(path, password)?
         .into_iter()
