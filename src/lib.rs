@@ -29,6 +29,7 @@ mod tests {
     };
     use crate::{archive::ArchiveKind, media::is_raw_path};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn recognizes_common_image_extensions_case_insensitively() {
@@ -101,6 +102,13 @@ mod tests {
             texture_cache_key(path, (1920, 1080)),
             texture_cache_key(path, (1280, 720))
         );
+    }
+
+    #[test]
+    fn load_latency_is_reported_in_milliseconds() {
+        let start = Instant::now();
+        let end = start + Duration::from_millis(125);
+        assert_eq!(crate::viewer::load_elapsed_ms(start, end), 125);
     }
 
     #[test]

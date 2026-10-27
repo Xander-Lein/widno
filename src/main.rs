@@ -3,9 +3,10 @@
 use std::{
     collections::VecDeque,
     fs,
-    path::PathBuf,
+    io::Write,
+    path::{Path, PathBuf},
     sync::mpsc::Receiver,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use eframe::{
@@ -21,11 +22,13 @@ use widno::{
     viewer::{
         is_supported_image_path, load_archive_entry_async, load_image_async_with_password,
         load_pdf_page_async, next_index, pan_for_drag, pan_for_resize, reset_view,
-        smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor, zoom_step, LoadedImage,
-        ViewerError,
+        load_elapsed_ms, smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor,
+        zoom_step, LoadedImage, ViewerError,
     },
     window::{mark_native_maximized, native_snap_style},
 };
+
+type ExifResult = Result<Vec<(String, String)>, String>;
 
 #[cfg(windows)]
 fn focus_widno_window(hwnd: windows_sys::Win32::Foundation::HWND) {
@@ -167,6 +170,8 @@ struct WidnoApp {
     texture: Option<TextureHandle>,
     texture_cache: VecDeque<(PathBuf, TextureHandle)>,
     loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
+    loading_started_at: Option<Instant>,
+    exif_loading: Option<Receiver<ExifResult>>,
     pending_path: Option<PathBuf>,
     password: String,
     error: Option<String>,
@@ -211,6 +216,8 @@ impl WidnoApp {
             texture: None,
             texture_cache: VecDeque::new(),
             loading: None,
+            loading_started_at: None,
+            exif_loading: None,
             pending_path: None,
             password: String::new(),
             error: None,
@@ -306,6 +313,7 @@ impl WidnoApp {
         }
         self.error = None;
         self.exif.clear();
+        self.exif_loading = None;
         self.pan = Vec2::ZERO;
         self.drag_start_pointer = None;
         self.pending_path = Some(path.clone());
@@ -316,16 +324,17 @@ impl WidnoApp {
         } else {
             None
         };
-        self.loading = if self
+        let image_cached = self
             .cache_key
             .as_deref()
             .and_then(|key| self.image_cache.get(key))
-            .is_some()
-        {
+            .is_some();
+        self.loading = if image_cached {
             None
         } else {
             Some(load_image_async_with_password(path, password))
         };
+        self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
     }
 
@@ -341,18 +350,19 @@ impl WidnoApp {
         self.metadata_size = entry.size.unwrap_or(0);
         self.error = None;
         self.exif.clear();
+        self.exif_loading = None;
         self.pan = Vec2::ZERO;
         self.drag_start_pointer = None;
         self.pending_path = Some(path.clone());
         self.prefetch_loading = None;
         self.prefetch_key = None;
         self.cache_key = Some(PathBuf::from(format!("{}::{}", path.display(), entry.name)));
-        self.loading = if self
+        let image_cached = self
             .cache_key
             .as_deref()
             .and_then(|key| self.image_cache.get(key))
-            .is_some()
-        {
+            .is_some();
+        self.loading = if image_cached {
             None
         } else {
             Some(load_archive_entry_async(
@@ -361,16 +371,19 @@ impl WidnoApp {
                 self.archive_password.clone(),
             ))
         };
+        self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
     }
 
     fn request_pdf_page(&mut self, path: PathBuf, page: usize) {
         self.error = None;
+        self.exif_loading = None;
         self.cache_key = None;
         self.prefetch_loading = None;
         self.prefetch_key = None;
         self.pending_path = Some(path.clone());
         self.loading = Some(load_pdf_page_async(path, page));
+        self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
     }
 
@@ -449,6 +462,7 @@ impl WidnoApp {
     }
 
     fn install_loaded_image(&mut self, ctx: &egui::Context, image: LoadedImage) {
+        let timing_source = image.source.clone();
         let archive_entry = image.archive_entry.clone();
         let archive_entries = image.archive_entries.clone();
         let viewport = ctx.screen_rect().size();
@@ -496,15 +510,70 @@ impl WidnoApp {
                 .position(|candidate| candidate.name == entry.name)
                 .unwrap_or(0);
         }
-        if let Some(image) = &self.image {
-            if image.source.is_file() {
-                self.exif = media::read_exif(&image.source).unwrap_or_default();
-            }
-        }
+        self.start_exif_load();
         self.start_prefetch();
+        self.record_load_timing(&timing_source);
+    }
+
+    fn record_load_timing(&mut self, source: &Path) {
+        let Some(start) = self.loading_started_at.take() else {
+            return;
+        };
+        if std::env::var_os("WIDNO_LOAD_TIMING").is_none() {
+            return;
+        }
+        let elapsed_ms = load_elapsed_ms(start, Instant::now());
+        let source_kind = if source.to_string_lossy().contains("::") {
+            "archive"
+        } else {
+            "file"
+        };
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join("widno-load-times.csv");
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{timestamp_ms},{elapsed_ms},{source_kind}");
+        }
+    }
+
+    fn start_exif_load(&mut self) {
+        let Some(path) = self
+            .image
+            .as_ref()
+            .map(|image| image.source.clone())
+            .filter(|path| path.is_file())
+        else {
+            self.exif_loading = None;
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = media::read_exif(&path).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.exif_loading = Some(receiver);
+    }
+
+    fn poll_exif(&mut self) {
+        let Some(receiver) = &self.exif_loading else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(exif)) => {
+                self.exif = exif;
+                self.exif_loading = None;
+            }
+            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.exif_loading = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
     }
 
     fn poll_image(&mut self, ctx: &egui::Context) {
+        self.poll_exif();
         self.poll_prefetch();
         if let Some(key) = self.cache_key.clone() {
             if let Some(image) = self.image_cache.get(&key) {

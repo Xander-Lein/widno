@@ -1,11 +1,11 @@
 use std::{
-    io::Cursor,
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver},
         Arc,
     },
     thread,
+    time::Instant,
 };
 
 use image::{DynamicImage, ImageReader};
@@ -56,6 +56,10 @@ pub fn texture_cache_key(source: &Path, viewport: (u32, u32)) -> PathBuf {
         viewport.0,
         viewport.1
     ))
+}
+
+pub fn load_elapsed_ms(start: Instant, end: Instant) -> u128 {
+    end.saturating_duration_since(start).as_millis()
 }
 
 pub fn zoom_step(current: f32, direction: i32) -> f32 {
@@ -182,11 +186,11 @@ pub fn load_image(path: impl Into<PathBuf>) -> Result<LoadedImage, ViewerError> 
             ));
         }
     }
-    let bytes = std::fs::read(&path).map_err(|error| ViewerError::Decode {
-        path: path.clone(),
-        source: image::ImageError::IoError(error),
-    })?;
-    let mut reader = ImageReader::new(Cursor::new(bytes))
+    let mut reader = ImageReader::open(&path)
+        .map_err(|source| ViewerError::Decode {
+            path: path.clone(),
+            source: image::ImageError::IoError(source),
+        })?
         .with_guessed_format()
         .map_err(|source| ViewerError::Decode {
             path: path.clone(),
