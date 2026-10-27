@@ -1,8 +1,9 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
-        Arc,
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::Instant,
@@ -15,6 +16,18 @@ use crate::{archive, media};
 
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 const MAX_IMAGE_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PREPARED_TEXTURE_BYTES: u64 = 512 * 1024 * 1024;
+
+pub type CancellationToken = Arc<AtomicBool>;
+
+fn decode_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn is_cancelled(token: &CancellationToken) -> bool {
+    token.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Error)]
 pub enum ViewerError {
@@ -106,12 +119,20 @@ pub struct PreparedTexture {
     pub rgba: Vec<u8>,
 }
 
-pub fn prepare_texture(image: &DynamicImage) -> PreparedTexture {
+pub fn prepare_texture(image: &DynamicImage) -> Result<PreparedTexture, ViewerError> {
+    let rgba_bytes = u64::from(image.width())
+        .saturating_mul(u64::from(image.height()))
+        .saturating_mul(4);
+    if rgba_bytes > MAX_PREPARED_TEXTURE_BYTES {
+        return Err(ViewerError::Message(
+            "image texture exceeds the 512 MiB safety limit".into(),
+        ));
+    }
     let rgba_image = image.to_rgba8();
-    PreparedTexture {
+    Ok(PreparedTexture {
         size: rgba_image.dimensions(),
         rgba: rgba_image.into_raw(),
-    }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -309,12 +330,33 @@ pub fn load_image_async_with_prepared_texture(
     path: PathBuf,
     password: Option<String>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
+    let token = Arc::new(AtomicBool::new(false));
+    load_image_async_with_prepared_texture_and_cancel(path, password, token)
+}
+
+pub fn load_image_async_with_prepared_texture_and_cancel(
+    path: PathBuf,
+    password: Option<String>,
+    token: CancellationToken,
+) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let result = load_path_with_password(path, password.as_deref()).map(|mut image| {
-            image.prepared_texture = Some(prepare_texture(&image.image));
-            image
-        });
+        let result = if is_cancelled(&token) {
+            Err(ViewerError::Message("image load cancelled".into()))
+        } else {
+            let _guard = decode_lock().lock().expect("decode lock poisoned");
+            if is_cancelled(&token) {
+                Err(ViewerError::Message("image load cancelled".into()))
+            } else {
+                load_path_with_password(path, password.as_deref()).and_then(|mut image| {
+                    if is_cancelled(&token) {
+                        return Err(ViewerError::Message("image load cancelled".into()));
+                    }
+                    image.prepared_texture = Some(prepare_texture(&image.image)?);
+                    Ok(image)
+                })
+            }
+        };
         let _ = sender.send(result);
     });
     receiver
@@ -333,24 +375,46 @@ pub fn load_archive_entry_async_with_prepared_texture(
     entry: archive::ArchiveEntry,
     password: Option<String>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
+    let token = Arc::new(AtomicBool::new(false));
+    load_archive_entry_async_with_prepared_texture_and_cancel(path, entry, password, token)
+}
+
+pub fn load_archive_entry_async_with_prepared_texture_and_cancel(
+    path: PathBuf,
+    entry: archive::ArchiveEntry,
+    password: Option<String>,
+    token: CancellationToken,
+) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let result = archive::load_image_entry(&path, &entry.name, password.as_deref())
-            .map_err(|error| ViewerError::Message(error.to_string()))
-            .and_then(|image| {
-                validate_image_size(&image)?;
-                Ok(LoadedImage {
-                    source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
-                    image: Arc::new(image),
-                    prepared_texture: None,
-                    archive_entry: Some(entry),
-                    archive_entries: None,
-                })
-            })
-            .map(|mut image| {
-                image.prepared_texture = Some(prepare_texture(&image.image));
-                image
-            });
+        let result = if is_cancelled(&token) {
+            Err(ViewerError::Message("image load cancelled".into()))
+        } else {
+            let _guard = decode_lock().lock().expect("decode lock poisoned");
+            if is_cancelled(&token) {
+                Err(ViewerError::Message("image load cancelled".into()))
+            } else {
+                archive::load_image_entry(&path, &entry.name, password.as_deref())
+                    .map_err(|error| ViewerError::Message(error.to_string()))
+                    .and_then(|image| {
+                        validate_image_size(&image)?;
+                        Ok(LoadedImage {
+                            source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
+                            image: Arc::new(image),
+                            prepared_texture: None,
+                            archive_entry: Some(entry),
+                            archive_entries: None,
+                        })
+                    })
+                    .and_then(|mut image| {
+                        if is_cancelled(&token) {
+                            return Err(ViewerError::Message("image load cancelled".into()));
+                        }
+                        image.prepared_texture = Some(prepare_texture(&image.image)?);
+                        Ok(image)
+                    })
+            }
+        };
         let _ = sender.send(result);
     });
     receiver
@@ -362,6 +426,7 @@ pub fn load_pdf_page_async(
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
+        let _guard = decode_lock().lock().expect("decode lock poisoned");
         let result = media::render_pdf_page(&path, page_index)
             .map_err(|error| ViewerError::Message(error.to_string()))
             .and_then(|image| {
@@ -373,6 +438,10 @@ pub fn load_pdf_page_async(
                     archive_entry: None,
                     archive_entries: None,
                 })
+            })
+            .and_then(|mut image| {
+                image.prepared_texture = Some(prepare_texture(&image.image)?);
+                Ok(image)
             });
         let _ = sender.send(result);
     });

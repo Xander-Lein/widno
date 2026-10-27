@@ -5,7 +5,8 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::mpsc::Receiver,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{mpsc::Receiver, Arc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,15 +21,16 @@ use widno::{
     metadata::{format_metadata, HEADER_HEIGHT},
     settings::{Settings, IMAGE_FORMATS},
     viewer::{
-        is_supported_image_path, load_pdf_page_async, next_index, pan_for_drag, pan_for_resize,
-        reset_view, load_elapsed_ms, load_archive_entry_async_with_prepared_texture,
-        load_image_async_with_prepared_texture, texture_cache_key, zoom_pan_for_cursor, zoom_step,
-        LoadedImage, ViewerError,
+        is_supported_image_path, load_archive_entry_async_with_prepared_texture_and_cancel,
+        load_elapsed_ms, load_image_async_with_prepared_texture_and_cancel, load_pdf_page_async,
+        next_index, pan_for_drag, pan_for_resize, reset_view, texture_cache_key,
+        zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
     },
     window::{mark_native_maximized, native_snap_style},
 };
 
 type ExifResult = Result<Vec<(String, String)>, String>;
+const TEXTURE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 #[cfg(windows)]
 fn focus_widno_window(hwnd: windows_sys::Win32::Foundation::HWND) {
@@ -168,8 +170,10 @@ fn widno_window_handle() -> windows_sys::Win32::Foundation::HWND {
 struct WidnoApp {
     image: Option<LoadedImage>,
     texture: Option<TextureHandle>,
-    texture_cache: VecDeque<(PathBuf, TextureHandle)>,
+    texture_cache: VecDeque<(PathBuf, TextureHandle, usize)>,
+    texture_cache_bytes: usize,
     loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
+    loading_cancel: Option<Arc<AtomicBool>>,
     loading_started_at: Option<Instant>,
     exif_loading: Option<Receiver<ExifResult>>,
     pending_path: Option<PathBuf>,
@@ -198,6 +202,7 @@ struct WidnoApp {
     image_cache: ImageCache,
     cache_key: Option<PathBuf>,
     prefetch_loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
+    prefetch_cancel: Option<Arc<AtomicBool>>,
     prefetch_key: Option<PathBuf>,
     startup_maximized: bool,
     native_snap_configured: bool,
@@ -215,7 +220,9 @@ impl WidnoApp {
             image: None,
             texture: None,
             texture_cache: VecDeque::new(),
+            texture_cache_bytes: 0,
             loading: None,
+            loading_cancel: None,
             loading_started_at: None,
             exif_loading: None,
             pending_path: None,
@@ -244,6 +251,7 @@ impl WidnoApp {
             image_cache: ImageCache::new(DEFAULT_CAPACITY),
             cache_key: None,
             prefetch_loading: None,
+            prefetch_cancel: None,
             prefetch_key: None,
             startup_maximized: true,
             native_snap_configured: false,
@@ -265,7 +273,28 @@ impl WidnoApp {
         self.request_image_with_password(path, None);
     }
 
+    fn cancel_loading(&mut self) {
+        if let Some(token) = self.loading_cancel.take() {
+            token.store(true, Ordering::Relaxed);
+        }
+        self.loading = None;
+    }
+
+    fn cancel_prefetch(&mut self) {
+        if let Some(token) = self.prefetch_cancel.take() {
+            token.store(true, Ordering::Relaxed);
+        }
+        self.prefetch_loading = None;
+        self.prefetch_key = None;
+    }
+
+    fn cancel_inflight(&mut self) {
+        self.cancel_loading();
+        self.cancel_prefetch();
+    }
+
     fn request_image_with_password(&mut self, path: PathBuf, password: Option<String>) {
+        self.cancel_inflight();
         if archive::archive_kind(&path).is_some() {
             self.archive_path = Some(path.clone());
             self.archive_entries.clear();
@@ -317,8 +346,7 @@ impl WidnoApp {
         self.pan = Vec2::ZERO;
         self.drag_start_pointer = None;
         self.pending_path = Some(path.clone());
-        self.prefetch_loading = None;
-        self.prefetch_key = None;
+        self.cancel_prefetch();
         self.cache_key = if archive::archive_kind(&path).is_none() {
             Some(path.clone())
         } else {
@@ -329,16 +357,21 @@ impl WidnoApp {
             .as_deref()
             .and_then(|key| self.image_cache.get(key))
             .is_some();
+        let token = Arc::new(AtomicBool::new(false));
         self.loading = if image_cached {
             None
         } else {
-            Some(load_image_async_with_prepared_texture(path, password))
+            self.loading_cancel = Some(token.clone());
+            Some(load_image_async_with_prepared_texture_and_cancel(
+                path, password, token,
+            ))
         };
         self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
     }
 
     fn request_archive_entry(&mut self, index: usize) {
+        self.cancel_inflight();
         let (Some(path), Some(entry)) = (
             self.archive_path.clone(),
             self.archive_entries.get(index).cloned(),
@@ -354,21 +387,23 @@ impl WidnoApp {
         self.pan = Vec2::ZERO;
         self.drag_start_pointer = None;
         self.pending_path = Some(path.clone());
-        self.prefetch_loading = None;
-        self.prefetch_key = None;
+        self.cancel_prefetch();
         self.cache_key = Some(PathBuf::from(format!("{}::{}", path.display(), entry.name)));
         let image_cached = self
             .cache_key
             .as_deref()
             .and_then(|key| self.image_cache.get(key))
             .is_some();
+        let token = Arc::new(AtomicBool::new(false));
         self.loading = if image_cached {
             None
         } else {
-            Some(load_archive_entry_async_with_prepared_texture(
+            self.loading_cancel = Some(token.clone());
+            Some(load_archive_entry_async_with_prepared_texture_and_cancel(
                 path,
                 entry,
                 self.archive_password.clone(),
+                token,
             ))
         };
         self.loading_started_at = Some(Instant::now());
@@ -376,11 +411,11 @@ impl WidnoApp {
     }
 
     fn request_pdf_page(&mut self, path: PathBuf, page: usize) {
+        self.cancel_inflight();
         self.error = None;
         self.exif_loading = None;
         self.cache_key = None;
-        self.prefetch_loading = None;
-        self.prefetch_key = None;
+        self.cancel_prefetch();
         self.pending_path = Some(path.clone());
         self.loading = Some(load_pdf_page_async(path, page));
         self.loading_started_at = Some(Instant::now());
@@ -399,11 +434,15 @@ impl WidnoApp {
                 let key = PathBuf::from(format!("{}::{}", path.display(), entry.name));
                 if self.image_cache.get(&key).is_none() {
                     self.prefetch_key = Some(key);
-                    self.prefetch_loading = Some(load_archive_entry_async_with_prepared_texture(
-                        path,
-                        entry,
-                        self.archive_password.clone(),
-                    ));
+                    let token = Arc::new(AtomicBool::new(false));
+                    self.prefetch_cancel = Some(token.clone());
+                    self.prefetch_loading =
+                        Some(load_archive_entry_async_with_prepared_texture_and_cancel(
+                            path,
+                            entry,
+                            self.archive_password.clone(),
+                            token,
+                        ));
                 }
             }
             return;
@@ -412,8 +451,11 @@ impl WidnoApp {
             if let Some(path) = self.siblings.get(index).cloned() {
                 if self.image_cache.get(&path).is_none() {
                     self.prefetch_key = Some(path.clone());
-                    self.prefetch_loading =
-                        Some(load_image_async_with_prepared_texture(path, None));
+                    let token = Arc::new(AtomicBool::new(false));
+                    self.prefetch_cancel = Some(token.clone());
+                    self.prefetch_loading = Some(
+                        load_image_async_with_prepared_texture_and_cancel(path, None, token),
+                    );
                 }
             }
         }
@@ -428,10 +470,12 @@ impl WidnoApp {
                 let _ = self.texture_for_image(ctx, &image);
                 self.image_cache.insert(image.source, image.image);
                 self.prefetch_loading = None;
+                self.prefetch_cancel = None;
                 self.prefetch_key = None;
             }
             Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.prefetch_loading = None;
+                self.prefetch_cancel = None;
                 self.prefetch_key = None;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -442,24 +486,35 @@ impl WidnoApp {
         let index = self
             .texture_cache
             .iter()
-            .position(|(cached_key, _)| cached_key == key)?;
+            .position(|(cached_key, _, _)| cached_key == key)?;
         let entry = self.texture_cache.remove(index)?;
+        self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(entry.2);
         let texture = entry.1.clone();
         self.texture_cache.push_back(entry);
         Some(texture)
     }
 
-    fn cache_texture(&mut self, key: PathBuf, texture: TextureHandle) {
+    fn cache_texture(&mut self, key: PathBuf, texture: TextureHandle, bytes: usize) {
+        if bytes > TEXTURE_CACHE_MAX_BYTES {
+            return;
+        }
         if let Some(index) = self
             .texture_cache
             .iter()
-            .position(|(cached_key, _)| cached_key == &key)
+            .position(|(cached_key, _, _)| cached_key == &key)
         {
-            self.texture_cache.remove(index);
+            if let Some((_, _, old_bytes)) = self.texture_cache.remove(index) {
+                self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(old_bytes);
+            }
         }
-        self.texture_cache.push_back((key, texture));
-        while self.texture_cache.len() > DEFAULT_CAPACITY {
-            self.texture_cache.pop_front();
+        self.texture_cache_bytes += bytes;
+        self.texture_cache.push_back((key, texture, bytes));
+        while self.texture_cache.len() > DEFAULT_CAPACITY
+            || self.texture_cache_bytes > TEXTURE_CACHE_MAX_BYTES
+        {
+            if let Some((_, _, old_bytes)) = self.texture_cache.pop_front() {
+                self.texture_cache_bytes = self.texture_cache_bytes.saturating_sub(old_bytes);
+            }
         }
     }
 
@@ -476,22 +531,24 @@ impl WidnoApp {
         } else {
             let rgba = image.image.to_rgba8();
             let size = [rgba.width() as usize, rgba.height() as usize];
+            let bytes = rgba.as_raw().len();
             let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
             let texture = ctx.load_texture(
                 image.source.to_string_lossy(),
                 color_image,
                 TextureOptions::LINEAR,
             );
-            self.cache_texture(texture_key, texture.clone());
+            self.cache_texture(texture_key, texture.clone(), bytes);
             return texture;
         };
+        let bytes = rgba.len();
         let color_image = ColorImage::from_rgba_unmultiplied(size, rgba);
         let texture = ctx.load_texture(
             image.source.to_string_lossy(),
             color_image,
             TextureOptions::LINEAR,
         );
-        self.cache_texture(texture_key, texture.clone());
+        self.cache_texture(texture_key, texture.clone(), bytes);
         texture
     }
 
@@ -500,6 +557,8 @@ impl WidnoApp {
         let archive_entry = image.archive_entry.clone();
         let archive_entries = image.archive_entries.clone();
         let texture = self.texture_for_image(ctx, &image);
+        let mut image = image;
+        image.prepared_texture = None;
         self.texture = Some(texture);
         self.image_cache
             .insert(image.source.clone(), image.image.clone());
@@ -595,6 +654,7 @@ impl WidnoApp {
                     },
                 );
                 self.loading = None;
+                self.loading_cancel = None;
                 self.pending_path = None;
                 self.cache_key = None;
                 return;
@@ -609,6 +669,7 @@ impl WidnoApp {
             Ok(Ok(image)) => {
                 self.install_loaded_image(ctx, image);
                 self.loading = None;
+                self.loading_cancel = None;
                 self.pending_path = None;
                 self.cache_key = None;
             }
@@ -617,11 +678,13 @@ impl WidnoApp {
                 self.texture = None;
                 self.image = None;
                 self.loading = None;
+                self.loading_cancel = None;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.error = Some("image loading worker stopped unexpectedly".to_string());
                 self.loading = None;
+                self.loading_cancel = None;
             }
         }
     }

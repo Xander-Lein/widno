@@ -54,9 +54,9 @@ mod tests {
     }
 
     #[test]
-    fn prepared_texture_contains_viewport_bounded_rgba_pixels() {
+    fn prepared_texture_contains_full_resolution_rgba_pixels() {
         let image = image::DynamicImage::new_rgba8(8000, 6000);
-        let prepared = crate::viewer::prepare_texture(&image);
+        let prepared = crate::viewer::prepare_texture(&image).expect("large test image");
         assert_eq!(prepared.size, (8000, 6000));
         assert_eq!(prepared.rgba.len(), 8000 * 6000 * 4);
     }
@@ -64,11 +64,17 @@ mod tests {
     #[test]
     fn prepared_texture_uses_actual_dimensions_after_aspect_ratio_resize() {
         let image = image::DynamicImage::new_rgba8(65, 31);
-        let prepared = crate::viewer::prepare_texture(&image);
+        let prepared = crate::viewer::prepare_texture(&image).expect("small image");
         assert_eq!(
             prepared.rgba.len(),
             prepared.size.0 as usize * prepared.size.1 as usize * 4
         );
+    }
+
+    #[test]
+    fn prepared_texture_rejects_excessive_rgba_budget() {
+        let image = image::DynamicImage::new_rgba8(16_000, 16_000);
+        assert!(crate::viewer::prepare_texture(&image).is_err());
     }
 
     #[test]
@@ -106,7 +112,7 @@ mod tests {
         let path = std::path::Path::new("photo.jpg");
         assert_eq!(
             texture_cache_key(path),
-            texture_cache_key(path)
+            std::path::PathBuf::from("photo.jpg")
         );
     }
 
