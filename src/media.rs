@@ -10,6 +10,9 @@ const RAW_EXTENSIONS: &[&str] = &[
     "sr2", "srf", "srw", "x3f",
 ];
 const MAX_RAW_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SVG_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RENDER_DIMENSION: u32 = 32_768;
+const MAX_RENDER_PIXELS: u64 = 100_000_000;
 
 pub fn is_raw_path(path: &Path) -> bool {
     path.extension()
@@ -26,10 +29,22 @@ pub fn is_svg_path(path: &Path) -> bool {
 }
 
 pub fn svg_preview(path: &Path) -> Result<DynamicImage> {
+    if std::fs::metadata(path)?.len() > MAX_SVG_FILE_BYTES {
+        anyhow::bail!("SVG file exceeds the 16 MiB safety limit");
+    }
     let data = std::fs::read(path)?;
     let options = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(&data, &options)?;
     let size = tree.size().to_int_size();
+    let pixels = u64::from(size.width())
+        .checked_mul(u64::from(size.height()))
+        .context("SVG dimensions overflow")?;
+    if size.width() > MAX_RENDER_DIMENSION
+        || size.height() > MAX_RENDER_DIMENSION
+        || pixels > MAX_RENDER_PIXELS
+    {
+        anyhow::bail!("SVG dimensions exceed the safety limit");
+    }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
         .context("SVG dimensions are too large")?;
     resvg::render(
@@ -108,14 +123,9 @@ pub fn read_exif(path: &Path) -> Result<Vec<(String, String)>> {
 
 #[cfg(feature = "pdf")]
 pub fn pdf_runtime_available() -> bool {
-    let directory = std::env::var_os("WIDNO_PDFIUM_PATH")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()?
-                .parent()
-                .map(Path::to_path_buf)
-        });
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
     directory
         .map(|directory| Pdfium::pdfium_platform_library_name_at_path(&directory).is_file())
         .unwrap_or(false)
@@ -153,15 +163,10 @@ pub fn render_pdf_page(path: &Path, page_index: usize) -> Result<DynamicImage> {
 
 #[cfg(feature = "pdf")]
 fn bind_pdfium() -> Result<Pdfium> {
-    let library_dir = std::env::var_os("WIDNO_PDFIUM_PATH")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()?
-                .parent()
-                .map(Path::to_path_buf)
-        })
-        .context("put pdfium.dll next to widno.exe or set WIDNO_PDFIUM_PATH")?;
+    let library_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .context("put pdfium.dll next to widno.exe")?;
     let library_name = Pdfium::pdfium_platform_library_name_at_path(&library_dir);
     let bindings = Pdfium::bind_to_library(library_name)?;
     Ok(Pdfium::new(bindings))

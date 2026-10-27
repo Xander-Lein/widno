@@ -17,10 +17,10 @@ mod tests {
 
     use crate::cache::ImageCache;
     use crate::metadata::{format_metadata, HEADER_HEIGHT};
-    use crate::settings::Settings;
+    use crate::settings::{context_extensions, Settings};
     use crate::viewer::{
         is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
-        smart_texture_dimensions, zoom_pan_for_cursor, zoom_step, ZoomMode,
+        smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor, zoom_step, ZoomMode,
     };
     use crate::window::{
         is_fullscreen, mark_native_maximized, native_snap_style, snap_action, snap_rect, Rect,
@@ -68,6 +68,7 @@ mod tests {
     fn settings_default_allows_images_and_archives_and_round_trips() {
         let settings = Settings::default();
         assert!(settings.enabled_formats[".svg"]);
+        assert!(settings.enabled_formats[".nrw"]);
         assert!(!settings.enabled_formats.contains_key(".rar"));
         assert!(settings.context_files);
         assert!(settings.context_archives);
@@ -79,6 +80,27 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read settings"))
                 .expect("parse settings");
         assert_eq!(loaded.enabled_formats, settings.enabled_formats);
+    }
+
+    #[test]
+    fn context_extensions_follow_settings_categories() {
+        let settings = Settings {
+            context_files: false,
+            context_archives: true,
+            ..Settings::default()
+        };
+        let extensions = context_extensions(&settings);
+        assert!(extensions.contains(&".cbz"));
+        assert!(!extensions.contains(&".jpg"));
+    }
+
+    #[test]
+    fn texture_cache_key_changes_with_viewport() {
+        let path = std::path::Path::new("photo.jpg");
+        assert_ne!(
+            texture_cache_key(path, (1920, 1080)),
+            texture_cache_key(path, (1280, 720))
+        );
     }
 
     #[test]
@@ -320,6 +342,30 @@ mod tests {
             Some(ArchiveKind::SevenZip)
         );
         assert!(is_raw_path(Path::new("camera.CR3")));
+    }
+
+    #[test]
+    fn archive_entry_names_reject_traversal_and_absolute_paths() {
+        assert!(crate::archive::is_safe_entry_name("folder/photo.jpg"));
+        assert!(!crate::archive::is_safe_entry_name("../photo.jpg"));
+        assert!(!crate::archive::is_safe_entry_name(
+            "folder/../../photo.jpg"
+        ));
+        assert!(!crate::archive::is_safe_entry_name(r"..\photo.jpg"));
+        assert!(!crate::archive::is_safe_entry_name("/photo.jpg"));
+        assert!(!crate::archive::is_safe_entry_name(r"C:\photo.jpg"));
+    }
+
+    #[test]
+    fn svg_preview_rejects_oversized_render_dimensions() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("huge.svg");
+        let mut svg = vec![b' '; 16 * 1024 * 1024 + 1];
+        svg.extend_from_slice(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1"/></svg>"#,
+        );
+        std::fs::write(&path, svg).expect("write SVG");
+        assert!(crate::media::svg_preview(&path).is_err());
     }
 
     #[cfg(not(feature = "pdf"))]

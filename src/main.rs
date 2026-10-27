@@ -21,134 +21,11 @@ use widno::{
     viewer::{
         is_supported_image_path, load_archive_entry_async, load_image_async_with_password,
         load_pdf_page_async, next_index, pan_for_drag, pan_for_resize, reset_view,
-        smart_texture_dimensions, zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
+        smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor, zoom_step, LoadedImage,
+        ViewerError,
     },
-    window::{
-        is_fullscreen, mark_native_maximized, native_snap_style, should_restore_before_snap,
-        snap_action, Rect, SnapAction, SnapDirection,
-    },
+    window::{mark_native_maximized, native_snap_style},
 };
-
-type WindowsSnapDirection = SnapDirection;
-
-#[cfg(windows)]
-#[allow(dead_code)]
-static SNAP_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-#[cfg(windows)]
-#[allow(dead_code)]
-static WIN_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn windows_snap_direction() -> Option<WindowsSnapDirection> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-
-    let win_down = unsafe { GetAsyncKeyState(0x5B) < 0 || GetAsyncKeyState(0x5C) < 0 };
-    if !win_down {
-        return None;
-    }
-    let key = [
-        (0x25, WindowsSnapDirection::Left),
-        (0x27, WindowsSnapDirection::Right),
-        (0x26, WindowsSnapDirection::Up),
-        (0x28, WindowsSnapDirection::Down),
-    ];
-    key.into_iter()
-        .find_map(|(code, direction)| unsafe { (GetAsyncKeyState(code) < 0).then_some(direction) })
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn windows_snap_direction() -> Option<WindowsSnapDirection> {
-    None
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn apply_windows_snap(
-    direction: WindowsSnapDirection,
-    current_override: Option<Rect>,
-) -> Option<Rect> {
-    use windows_sys::Win32::{
-        Foundation::RECT,
-        Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, RedrawWindow, MONITORINFO,
-            MONITOR_DEFAULTTONEAREST, RDW_INVALIDATE, RDW_UPDATENOW,
-        },
-        UI::WindowsAndMessaging::{
-            GetWindowRect, IsIconic, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER,
-            SWP_SHOWWINDOW, SW_MINIMIZE, SW_RESTORE,
-        },
-    };
-
-    let hwnd = widno_window_handle();
-    if hwnd.is_null() {
-        return None;
-    }
-    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return None;
-    }
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        rcMonitor: RECT::default(),
-        rcWork: RECT::default(),
-        dwFlags: 0,
-    };
-    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
-        return None;
-    }
-    let current = if let Some(current) = current_override {
-        current
-    } else {
-        let mut current = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &mut current) } == 0 {
-            return None;
-        }
-        Rect::new(current.left, current.top, current.right, current.bottom)
-    };
-    let action = snap_action(
-        current,
-        Rect::new(
-            info.rcWork.left,
-            info.rcWork.top,
-            info.rcWork.right,
-            info.rcWork.bottom,
-        ),
-        direction,
-    );
-    let target = match action {
-        SnapAction::Rect(target) => target,
-        SnapAction::Minimize => {
-            unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
-            return Some(current);
-        }
-        SnapAction::Noop => return Some(current),
-    };
-    let is_minimized = unsafe { IsIconic(hwnd) != 0 };
-    unsafe {
-        if should_restore_before_snap(is_minimized) {
-            ShowWindow(hwnd, SW_RESTORE);
-        }
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            target.left,
-            target.top,
-            target.width(),
-            target.bottom - target.top,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
-        RedrawWindow(
-            hwnd,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            RDW_INVALIDATE | RDW_UPDATENOW,
-        );
-        focus_widno_window(hwnd);
-    }
-    Some(target)
-}
 
 #[cfg(windows)]
 fn focus_widno_window(hwnd: windows_sys::Win32::Foundation::HWND) {
@@ -258,290 +135,6 @@ fn configure_native_snap_window() {}
 fn maximize_widno_window() {}
 
 #[cfg(windows)]
-#[allow(dead_code)]
-fn start_minimized_snap_monitor() {
-    use std::{thread, time::Duration};
-    use windows_sys::Win32::{
-        Foundation::{LPARAM, LRESULT, WPARAM},
-        System::LibraryLoader::GetModuleHandleW,
-        UI::Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_DOWN, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_UP,
-        },
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, SetWindowsHookExW, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        },
-    };
-
-    start_windows_snap_polling();
-
-    unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
-        if code >= 0 {
-            let event = unsafe { *(data as *const KBDLLHOOKSTRUCT) };
-            let is_win = event.vkCode == VK_LWIN as u32 || event.vkCode == VK_RWIN as u32;
-            let is_key_down = message == WM_KEYDOWN as usize || message == WM_SYSKEYDOWN as usize;
-            let is_key_up = message == WM_KEYUP as usize || message == WM_SYSKEYUP as usize;
-            if is_win && is_key_down {
-                WIN_HELD.store(true, std::sync::atomic::Ordering::Release);
-            } else if is_win && is_key_up {
-                WIN_HELD.store(false, std::sync::atomic::Ordering::Release);
-            }
-            if !is_key_down {
-                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
-            }
-            let win_down = WIN_HELD.load(std::sync::atomic::Ordering::Acquire)
-                || unsafe {
-                    GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0
-                };
-            let direction = match event.vkCode {
-                key if key == VK_LEFT as u32 => Some(WindowsSnapDirection::Left),
-                key if key == VK_RIGHT as u32 => Some(WindowsSnapDirection::Right),
-                key if key == VK_UP as u32 => Some(WindowsSnapDirection::Up),
-                key if key == VK_DOWN as u32 => Some(WindowsSnapDirection::Down),
-                _ => None,
-            };
-            if win_down {
-                if let Some(direction) = direction {
-                    if direction == WindowsSnapDirection::Up
-                        && widno_is_foreground()
-                        && widno_is_fullscreen()
-                    {
-                        return 1;
-                    }
-                    let should_defer = widno_is_minimized() || widno_is_foreground();
-                    if should_defer
-                        && SNAP_PENDING
-                            .compare_exchange(
-                                false,
-                                true,
-                                std::sync::atomic::Ordering::AcqRel,
-                                std::sync::atomic::Ordering::Acquire,
-                            )
-                            .is_ok()
-                    {
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(250));
-                            let _ = apply_windows_snap(direction, None);
-                            SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
-                        });
-                        return 1;
-                    }
-                }
-            }
-        }
-        unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) }
-    }
-
-    thread::spawn(move || {
-        let hook = unsafe {
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_proc),
-                GetModuleHandleW(std::ptr::null()),
-                0,
-            )
-        };
-        if hook.is_null() {
-            return;
-        }
-        let mut message = MSG::default();
-        loop {
-            let result = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
-            if result <= 0 {
-                break;
-            }
-        }
-        unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
-        }
-    });
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn start_windows_snap_polling() {
-    use std::{thread, time::Duration};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_DOWN, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_UP,
-    };
-
-    thread::spawn(|| {
-        let mut armed = true;
-        let mut was_foreground = false;
-        let mut last_visible_rect = None;
-        loop {
-            let minimized = widno_is_minimized();
-            if !minimized && widno_is_foreground() {
-                was_foreground = true;
-                last_visible_rect = current_widno_rect();
-            }
-            if minimized && was_foreground {
-                if let Some(current) = last_visible_rect.take() {
-                    if SNAP_PENDING
-                        .compare_exchange(
-                            false,
-                            true,
-                            std::sync::atomic::Ordering::AcqRel,
-                            std::sync::atomic::Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        thread::spawn(move || {
-                            thread::sleep(Duration::from_millis(60));
-                            let _ = apply_windows_snap(WindowsSnapDirection::Down, Some(current));
-                            SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
-                        });
-                    }
-                }
-                was_foreground = false;
-            }
-            let win_down = unsafe {
-                GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0
-            };
-            let direction = if win_down {
-                [
-                    (VK_LEFT, WindowsSnapDirection::Left),
-                    (VK_RIGHT, WindowsSnapDirection::Right),
-                    (VK_UP, WindowsSnapDirection::Up),
-                    (VK_DOWN, WindowsSnapDirection::Down),
-                ]
-                .into_iter()
-                .find_map(|(key, direction)| unsafe {
-                    (GetAsyncKeyState(key as i32) < 0).then_some(direction)
-                })
-            } else {
-                None
-            };
-            if direction.is_none() {
-                armed = true;
-            } else if let Some(direction) = direction {
-                if armed && widno_is_foreground() {
-                    if let Some(current) = current_widno_rect() {
-                        if SNAP_PENDING
-                            .compare_exchange(
-                                false,
-                                true,
-                                std::sync::atomic::Ordering::AcqRel,
-                                std::sync::atomic::Ordering::Acquire,
-                            )
-                            .is_ok()
-                        {
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(60));
-                                let _ = apply_windows_snap(direction, Some(current));
-                                SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
-                            });
-                        }
-                    }
-                    armed = false;
-                }
-            }
-            thread::sleep(Duration::from_millis(8));
-        }
-    });
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn current_widno_rect() -> Option<Rect> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
-
-    let hwnd = widno_window_handle();
-    if hwnd.is_null() {
-        return None;
-    }
-    let mut rect = windows_sys::Win32::Foundation::RECT::default();
-    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
-        return None;
-    }
-    Some(Rect::new(rect.left, rect.top, rect.right, rect.bottom))
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn widno_is_fullscreen() -> bool {
-    use windows_sys::Win32::{
-        Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        },
-        UI::WindowsAndMessaging::GetWindowRect,
-    };
-
-    let hwnd = widno_window_handle();
-    if hwnd.is_null() {
-        return false;
-    }
-    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return false;
-    }
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        rcMonitor: windows_sys::Win32::Foundation::RECT::default(),
-        rcWork: windows_sys::Win32::Foundation::RECT::default(),
-        dwFlags: 0,
-    };
-    let mut current = windows_sys::Win32::Foundation::RECT::default();
-    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0
-        || unsafe { GetWindowRect(hwnd, &mut current) } == 0
-    {
-        return false;
-    }
-    is_fullscreen(
-        Rect::new(current.left, current.top, current.right, current.bottom),
-        Rect::new(
-            info.rcWork.left,
-            info.rcWork.top,
-            info.rcWork.right,
-            info.rcWork.bottom,
-        ),
-    )
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn start_minimized_snap_monitor() {}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn widno_is_foreground() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
-
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_null() {
-        return false;
-    }
-    let mut process_id = 0;
-    unsafe {
-        GetWindowThreadProcessId(foreground, &mut process_id);
-    }
-    process_id == std::process::id()
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn widno_is_foreground() -> bool {
-    false
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn widno_is_minimized() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
-
-    let hwnd = widno_window_handle();
-    !hwnd.is_null() && unsafe { IsIconic(hwnd) != 0 }
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn widno_is_minimized() -> bool {
-    false
-}
-
-#[cfg(windows)]
 fn widno_window_handle() -> windows_sys::Win32::Foundation::HWND {
     use windows_sys::{
         core::BOOL,
@@ -567,15 +160,6 @@ fn widno_window_handle() -> windows_sys::Win32::Foundation::HWND {
         EnumWindows(Some(find_window), &mut hwnd as *mut _ as isize);
     }
     hwnd
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn apply_windows_snap(
-    _direction: WindowsSnapDirection,
-    _current_override: Option<Rect>,
-) -> Option<Rect> {
-    None
 }
 
 struct WidnoApp {
@@ -867,15 +451,14 @@ impl WidnoApp {
     fn install_loaded_image(&mut self, ctx: &egui::Context, image: LoadedImage) {
         let archive_entry = image.archive_entry.clone();
         let archive_entries = image.archive_entries.clone();
-        let texture = if let Some(texture) = self.cached_texture(&image.source) {
+        let viewport = ctx.screen_rect().size();
+        let viewport_key = (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32);
+        let texture_key = texture_cache_key(&image.source, viewport_key);
+        let texture = if let Some(texture) = self.cached_texture(&texture_key) {
             texture
         } else {
             let native_dimensions = (image.image.width(), image.image.height());
-            let viewport = ctx.screen_rect().size();
-            let texture_dimensions = smart_texture_dimensions(
-                native_dimensions,
-                (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32),
-            );
+            let texture_dimensions = smart_texture_dimensions(native_dimensions, viewport_key);
             let texture_image = if texture_dimensions != native_dimensions {
                 image.image.resize(
                     texture_dimensions.0,
@@ -893,7 +476,7 @@ impl WidnoApp {
                 color_image,
                 TextureOptions::LINEAR,
             );
-            self.cache_texture(image.source.clone(), texture.clone());
+            self.cache_texture(texture_key, texture.clone());
             texture
         };
         self.texture = Some(texture);

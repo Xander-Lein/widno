@@ -8,7 +8,7 @@
 - frameless desktop window на `eframe/egui`;
 - автоматическое скрытие верхней панели;
 - drag-and-drop и путь к файлу первым аргументом;
-- fit-to-window, 100%, zoom клавишами `+`/`-`, fullscreen `F11`;
+- fit-to-window, 100% и zoom клавишами `+`/`-`;
 - навигационная модель с циклическим переходом;
 - common image formats через `image`: JPEG, PNG, GIF, BMP, TIFF, WebP, ICO и PNM/TGA;
 - безопасный статический просмотр SVG;
@@ -29,8 +29,7 @@ cargo run --release -- path\to\image.jpg
 
 PDF отключён в стандартной Windows-сборке, чтобы не увеличивать размер и
 время запуска приложения. Для отдельной сборки с PDF используйте
-`--features pdf` и положите совместимый `pdfium.dll` рядом с приложением или
-задайте `WIDNO_PDFIUM_PATH` каталогом, в котором он находится.
+`--features pdf` и положите совместимый `pdfium.dll` рядом с приложением.
 
 При первом запуске откроются настройки. Их можно открыть повторно сочетанием
 `Ctrl+P`. Widno не перезаписывает существующий `UserChoice` Windows для

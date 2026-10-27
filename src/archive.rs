@@ -12,6 +12,17 @@ use zip::ZipArchive;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 
+pub fn is_safe_entry_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.starts_with('\\')
+        || name.as_bytes().get(1) == Some(&b':')
+    {
+        return false;
+    }
+    !name.split(['/', '\\']).any(|component| component == "..")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveKind {
     Zip,
@@ -94,6 +105,9 @@ pub fn list_entries(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEn
 }
 
 pub fn read_entry(path: &Path, entry_name: &str, password: Option<&str>) -> Result<Vec<u8>> {
+    if !is_safe_entry_name(entry_name) {
+        anyhow::bail!("unsafe archive entry path: {entry_name}");
+    }
     match archive_kind(path).context("unsupported archive extension")? {
         ArchiveKind::Zip => {
             let file = File::open(path)?;
@@ -129,7 +143,27 @@ pub fn read_entry(path: &Path, entry_name: &str, password: Option<&str>) -> Resu
             if size > MAX_ENTRY_BYTES {
                 anyhow::bail!("archive entry exceeds the 256 MiB safety limit");
             }
-            Ok(reader.read_file(entry_name)?)
+            let mut result = None;
+            let mut oversized = false;
+            reader.for_each_entries(|entry, stream| {
+                if entry.name == entry_name {
+                    let mut bytes = Vec::new();
+                    stream.take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes)?;
+                    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+                        oversized = true;
+                        return Ok(false);
+                    }
+                    result = Some(bytes);
+                    Ok(false)
+                } else {
+                    std::io::copy(stream, &mut std::io::sink())?;
+                    Ok(true)
+                }
+            })?;
+            if oversized {
+                anyhow::bail!("archive entry exceeds the 256 MiB safety limit");
+            }
+            result.ok_or_else(|| anyhow!("archive entry not found: {entry_name}"))
         }
         ArchiveKind::Rar => {
             let file = File::open(path)?;
@@ -188,6 +222,9 @@ pub fn image_entries(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveE
     Ok(list_entries(path, password)?
         .into_iter()
         .filter(|entry| {
+            if !is_safe_entry_name(&entry.name) {
+                return false;
+            }
             let candidate = PathBuf::from(&entry.name);
             crate::viewer::is_supported_image_path(&candidate)
         })

@@ -49,6 +49,15 @@ pub fn smart_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u3
     (scaled_width as u32, scaled_height as u32)
 }
 
+pub fn texture_cache_key(source: &Path, viewport: (u32, u32)) -> PathBuf {
+    PathBuf::from(format!(
+        "{}#viewport:{}x{}",
+        source.display(),
+        viewport.0,
+        viewport.1
+    ))
+}
+
 pub fn zoom_step(current: f32, direction: i32) -> f32 {
     let current = current.clamp(0.05, 32.0);
     (current + ZOOM_STEP * direction.signum() as f32).clamp(0.05, 32.0)
