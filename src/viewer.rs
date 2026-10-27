@@ -49,6 +49,10 @@ pub fn smart_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u3
     (scaled_width as u32, scaled_height as u32)
 }
 
+pub fn prefetch_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u32, u32) {
+    smart_texture_dimensions(native, viewport)
+}
+
 pub fn texture_cache_key(source: &Path, viewport: (u32, u32)) -> PathBuf {
     PathBuf::from(format!(
         "{}#viewport:{}x{}",

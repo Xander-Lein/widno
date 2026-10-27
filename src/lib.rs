@@ -20,7 +20,8 @@ mod tests {
     use crate::settings::{context_extensions, Settings};
     use crate::viewer::{
         is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
-        smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor, zoom_step, ZoomMode,
+        prefetch_texture_dimensions, smart_texture_dimensions, texture_cache_key,
+        zoom_pan_for_cursor, zoom_step, ZoomMode,
     };
     use crate::window::{
         is_fullscreen, mark_native_maximized, native_snap_style, snap_action, snap_rect, Rect,
@@ -62,6 +63,14 @@ mod tests {
         assert_eq!(
             smart_texture_dimensions((1200, 800), (1920, 1080)),
             (1200, 800)
+        );
+    }
+
+    #[test]
+    fn prefetch_texture_dimensions_match_the_viewport_budget() {
+        assert_eq!(
+            prefetch_texture_dimensions((8000, 6000), (1920, 1080)),
+            (3840, 2880)
         );
     }
 

@@ -22,7 +22,7 @@ use widno::{
     viewer::{
         is_supported_image_path, load_archive_entry_async, load_image_async_with_password,
         load_pdf_page_async, next_index, pan_for_drag, pan_for_resize, reset_view,
-        load_elapsed_ms, smart_texture_dimensions, texture_cache_key, zoom_pan_for_cursor,
+        load_elapsed_ms, prefetch_texture_dimensions, texture_cache_key, zoom_pan_for_cursor,
         zoom_step, LoadedImage, ViewerError,
     },
     window::{mark_native_maximized, native_snap_style},
@@ -418,12 +418,13 @@ impl WidnoApp {
         }
     }
 
-    fn poll_prefetch(&mut self) {
+    fn poll_prefetch(&mut self, ctx: &egui::Context) {
         let Some(receiver) = &self.prefetch_loading else {
             return;
         };
         match receiver.try_recv() {
             Ok(Ok(image)) => {
+                let _ = self.texture_for_image(ctx, &image);
                 self.image_cache.insert(image.source, image.image);
                 self.prefetch_loading = None;
                 self.prefetch_key = None;
@@ -461,38 +462,41 @@ impl WidnoApp {
         }
     }
 
+    fn texture_for_image(&mut self, ctx: &egui::Context, image: &LoadedImage) -> TextureHandle {
+        let viewport = ctx.screen_rect().size();
+        let viewport_key = (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32);
+        let texture_key = texture_cache_key(&image.source, viewport_key);
+        if let Some(texture) = self.cached_texture(&texture_key) {
+            return texture;
+        }
+        let native_dimensions = (image.image.width(), image.image.height());
+        let texture_dimensions = prefetch_texture_dimensions(native_dimensions, viewport_key);
+        let texture_image = if texture_dimensions != native_dimensions {
+            image.image.resize(
+                texture_dimensions.0,
+                texture_dimensions.1,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            image.image.as_ref().clone()
+        };
+        let rgba = texture_image.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        let texture = ctx.load_texture(
+            image.source.to_string_lossy(),
+            color_image,
+            TextureOptions::LINEAR,
+        );
+        self.cache_texture(texture_key, texture.clone());
+        texture
+    }
+
     fn install_loaded_image(&mut self, ctx: &egui::Context, image: LoadedImage) {
         let timing_source = image.source.clone();
         let archive_entry = image.archive_entry.clone();
         let archive_entries = image.archive_entries.clone();
-        let viewport = ctx.screen_rect().size();
-        let viewport_key = (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32);
-        let texture_key = texture_cache_key(&image.source, viewport_key);
-        let texture = if let Some(texture) = self.cached_texture(&texture_key) {
-            texture
-        } else {
-            let native_dimensions = (image.image.width(), image.image.height());
-            let texture_dimensions = smart_texture_dimensions(native_dimensions, viewport_key);
-            let texture_image = if texture_dimensions != native_dimensions {
-                image.image.resize(
-                    texture_dimensions.0,
-                    texture_dimensions.1,
-                    image::imageops::FilterType::Triangle,
-                )
-            } else {
-                image.image.as_ref().clone()
-            };
-            let rgba = texture_image.to_rgba8();
-            let size = [rgba.width() as usize, rgba.height() as usize];
-            let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-            let texture = ctx.load_texture(
-                image.source.to_string_lossy(),
-                color_image,
-                TextureOptions::LINEAR,
-            );
-            self.cache_texture(texture_key, texture.clone());
-            texture
-        };
+        let texture = self.texture_for_image(ctx, &image);
         self.texture = Some(texture);
         self.image_cache
             .insert(image.source.clone(), image.image.clone());
@@ -574,7 +578,7 @@ impl WidnoApp {
 
     fn poll_image(&mut self, ctx: &egui::Context) {
         self.poll_exif();
-        self.poll_prefetch();
+        self.poll_prefetch(ctx);
         if let Some(key) = self.cache_key.clone() {
             if let Some(image) = self.image_cache.get(&key) {
                 self.install_loaded_image(
