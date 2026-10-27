@@ -19,7 +19,6 @@ use widno::{
     cache::{ImageCache, DEFAULT_CAPACITY},
     media,
     metadata::{format_metadata, HEADER_HEIGHT},
-    settings::{Settings, IMAGE_FORMATS},
     viewer::{
         is_supported_image_path, load_archive_entry_async_with_prepared_texture_and_cancel,
         load_elapsed_ms, load_image_async_with_prepared_texture_and_cancel, load_pdf_page_async,
@@ -206,16 +205,11 @@ struct WidnoApp {
     prefetch_key: Option<PathBuf>,
     startup_maximized: bool,
     native_snap_configured: bool,
-    settings: Settings,
-    settings_path: PathBuf,
-    settings_open: bool,
     last_viewport_size: Option<Vec2>,
 }
 
 impl WidnoApp {
     fn new(cc: &CreationContext<'_>) -> Self {
-        let (settings, settings_path) = Settings::load();
-        let settings_open = !settings.initialized;
         let mut app = Self {
             image: None,
             texture: None,
@@ -255,9 +249,6 @@ impl WidnoApp {
             prefetch_key: None,
             startup_maximized: true,
             native_snap_configured: false,
-            settings,
-            settings_path,
-            settings_open,
             last_viewport_size: None,
         };
 
@@ -759,10 +750,6 @@ impl WidnoApp {
             if input.modifiers.ctrl && input.key_pressed(Key::S) {
                 save_requested = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::P) {
-                self.settings_open = true;
-                changed = true;
-            }
             if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
                 navigation = 1;
             }
@@ -890,60 +877,6 @@ impl WidnoApp {
         };
         if let Err(error) = image.image.save_with_format(path, format) {
             eprintln!("save failed: {error}");
-        }
-    }
-
-    fn show_settings(&mut self, ctx: &egui::Context) {
-        if !self.settings_open {
-            return;
-        }
-        let mut save = false;
-        egui::Window::new("Настройки Widno")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(420.0)
-            .show(ctx, |ui| {
-                ui.heading("Open files with Widno by default");
-                ui.label("Выберите форматы изображений для Widno и OpenWithProgids.");
-                ui.separator();
-                ui.columns(3, |columns| {
-                    for (index, extension) in IMAGE_FORMATS.iter().enumerate() {
-                        let enabled = self
-                            .settings
-                            .enabled_formats
-                            .entry((*extension).to_string())
-                            .or_insert(true);
-                        columns[index % 3].checkbox(enabled, *extension);
-                    }
-                });
-                ui.separator();
-                ui.heading("Add Widno to context menu");
-                ui.checkbox(&mut self.settings.context_files, "Files");
-                ui.checkbox(&mut self.settings.context_archives, "Archives");
-                ui.checkbox(&mut self.settings.context_folders, "Folders");
-                ui.separator();
-                ui.label("Изменение приложения по умолчанию выполняется только после подтверждения Windows.");
-                if ui.button("Открыть настройки приложений Windows").clicked() {
-                    #[cfg(windows)]
-                    {
-                        let _ = std::process::Command::new("cmd")
-                            .args(["/C", "start", "", "ms-settings:defaultapps"])
-                            .spawn();
-                    }
-                }
-                if ui.button("Сохранить").clicked() {
-                    save = true;
-                }
-            });
-        if save {
-            self.settings.initialized = true;
-            if let Err(error) = widno::settings::apply_default_associations(&self.settings) {
-                self.error = Some(format!("Не удалось применить ассоциации: {error}"));
-            }
-            if let Err(error) = self.settings.save(&self.settings_path) {
-                self.error = Some(format!("Не удалось сохранить настройки: {error}"));
-            }
-            self.settings_open = false;
         }
     }
 
@@ -1111,8 +1044,6 @@ impl App for WidnoApp {
                         });
                 }
             });
-
-        self.show_settings(ctx);
 
         if let Some(path) = retry_path {
             self.request_image_with_password(path, Some(self.password.clone()));

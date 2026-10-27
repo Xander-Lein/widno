@@ -1,8 +1,8 @@
 pub mod archive;
 pub mod cache;
+pub mod formats;
 pub mod media;
 pub mod metadata;
-pub mod settings;
 pub mod viewer;
 pub mod window;
 
@@ -16,8 +16,8 @@ mod tests {
     use image::GenericImageView;
 
     use crate::cache::ImageCache;
+    use crate::formats::context_extensions;
     use crate::metadata::{format_metadata, HEADER_HEIGHT};
-    use crate::settings::{context_extensions, Settings};
     use crate::viewer::{
         is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
         texture_cache_key, zoom_pan_for_cursor, zoom_step, ZoomMode,
@@ -78,33 +78,56 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_allows_images_and_archives_and_round_trips() {
-        let settings = Settings::default();
-        assert!(settings.enabled_formats[".svg"]);
-        assert!(settings.enabled_formats[".nrw"]);
-        assert!(!settings.enabled_formats.contains_key(".rar"));
-        assert!(settings.context_files);
-        assert!(settings.context_archives);
-        assert!(settings.context_folders);
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("settings.json");
-        settings.save(&path).expect("save settings");
-        let loaded: Settings =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("read settings"))
-                .expect("parse settings");
-        assert_eq!(loaded.enabled_formats, settings.enabled_formats);
+    fn context_menu_extensions_include_supported_images_and_archives() {
+        let extensions = context_extensions();
+        assert!(extensions.contains(&".jpg"));
+        assert!(extensions.contains(&".cbz"));
+        assert!(extensions.contains(&".rar"));
     }
 
     #[test]
-    fn context_extensions_follow_settings_categories() {
-        let settings = Settings {
-            context_files: false,
-            context_archives: true,
-            ..Settings::default()
-        };
-        let extensions = context_extensions(&settings);
-        assert!(extensions.contains(&".cbz"));
-        assert!(!extensions.contains(&".jpg"));
+    fn context_menu_registration_is_explicit_and_never_default_association() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("register-file-associations.ps1"),
+        )
+        .expect("context menu registration script");
+        assert!(script.contains("Open with Widno"));
+        assert!(script.contains("Directory\\shell"));
+        assert!(script.contains("SystemFileAssociations"));
+        assert!(script.contains("Remove-Item -LiteralPath (Join-Path $systemAssociationKey"));
+        assert!(script.contains("Set-Item -Path $Path -Value $Value"));
+        assert!(!script.contains("New-ItemProperty -LiteralPath $openWithProgids"));
+        assert!(!script.contains("Set-DefaultIfUnclaimed"));
+    }
+
+    #[test]
+    fn installer_uses_per_user_local_appdata_directory() {
+        let installer = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("installer")
+                .join("widno.iss"),
+        )
+        .expect("installer script");
+        assert!(installer.contains("DefaultDirName={localappdata}\\Programs\\Widno"));
+        assert!(!installer.contains("DefaultDirName={autopf}\\Widno"));
+        assert!(installer.contains("PrivilegesRequired=lowest"));
+    }
+
+    #[test]
+    fn installer_has_no_additional_tasks_page_and_explains_associations() {
+        let installer = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("installer")
+                .join("widno.iss"),
+        )
+        .expect("installer script");
+        assert!(!installer.contains("[Tasks]"));
+        assert!(installer.contains("[Messages]"));
+        assert!(installer.contains("FinishedLabel="));
+        assert!(installer.contains("Open with Widno"));
+        assert!(installer.contains("default"));
     }
 
     #[test]

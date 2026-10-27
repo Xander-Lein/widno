@@ -1,5 +1,5 @@
 #define AppName "Widno"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppPublisher "Xander-Lein"
 #define AppURL "https://github.com/Xander-Lein/widno"
 #define AppExeName "widno.exe"
@@ -18,7 +18,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-OutputDir=..\..\dist
+OutputDir=..\dist
 OutputBaseFilename=Widno-{#AppVersion}-Windows-x64-Setup
 SetupIconFile=..\assets\widno-icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
@@ -33,9 +33,9 @@ LicenseFile=..\LICENSE
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
-Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
+[Messages]
+FinishedHeadingLabel=Widno installation completed
+FinishedLabel=Open with Widno was added to the context menu for supported images, archives and folders. Widno does not change your default Windows applications. To choose Widno as the default app, use Windows Settings > Apps > Default apps.
 
 [Files]
 Source: "..\target\release\widno.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -44,8 +44,11 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\scripts\register-file-associations.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Widno"; Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon
-Name: "{autodesktop}\Widno"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\Widno"; Filename: "{app}\{#AppExeName}"
 
 [Run]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\register-file-associations.ps1"" -Binary ""{app}\{#AppExeName}"""; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Description: "Launch Widno"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\register-file-associations.ps1"" -Binary ""{app}\{#AppExeName}"" -Unregister"; Flags: runhidden waituntilterminated; RunOnceId: "WidnoContextMenuCleanup"

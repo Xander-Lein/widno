@@ -1,4 +1,4 @@
-# Widno 1.0.0
+# Widno 1.0.1
 
 ![Widno icon](assets/widno-icon.png)
 
@@ -12,7 +12,7 @@
 ## Скачать
 
 Откройте страницу [Releases](https://github.com/Xander-Lein/widno/releases) и
-скачайте `Widno-1.0.0-Windows-x64-Setup.exe`.
+скачайте `Widno-1.0.1-Windows-x64-Setup.exe`.
 
 Установщик рассчитан на Windows 10/11 x64. Исходники доступны через кнопку
 `Source code (zip)` на странице релиза.
@@ -40,21 +40,28 @@ PDF отключён в стандартной сборке, чтобы не у�
 | Увеличить/уменьшить | `Ctrl +` / `Ctrl -` |
 | Сбросить масштаб и центр | `Ctrl+0` |
 | Сохранить как | `Ctrl+S` |
-| Настройки | `Ctrl+P` |
 | Закрыть | `Esc` или `Alt+F4` |
 | Переместить увеличенное изображение | зажать ЛКМ и перетащить |
 
 ## Установка и ассоциации
 
-Установщик добавляет Widno в меню «Пуск». Ассоциации и пункт
-`Browse with Widno` можно настроить в `Ctrl+P`. Уже выбранное пользователем
-приложение Windows не перезаписывается.
+Установщик добавляет Widno в меню «Пуск» и регистрирует пункт
+`Open with Widno` для поддерживаемых изображений, архивов и папок.
+Widno не назначается приложением по умолчанию и не перезаписывает выбор
+пользователя в Windows.
 
 Для ручной регистрации текущего EXE:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\register-file-associations.ps1 `
   -Binary .\target\release\widno.exe
+```
+
+Скрипт также поддерживает удаление добавленных пунктов:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-file-associations.ps1 `
+  -Binary .\target\release\widno.exe -Unregister
 ```
 
 ## Сборка из исходников
@@ -87,7 +94,7 @@ Widno is a compact, fast Windows x64 image viewer written in Rust. It provides
 a borderless UI, native Windows Snap support, folder navigation, archive image
 browsing, zoom/pan, metadata, export, and a RAM-only LRU cache.
 
-Download `Widno-1.0.0-Windows-x64-Setup.exe` from
+Download `Widno-1.0.1-Windows-x64-Setup.exe` from
 [GitHub Releases](https://github.com/Xander-Lein/widno/releases). The GitHub
 release page also provides the automatically generated `Source code (zip)`.
 
