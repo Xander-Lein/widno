@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::{
+    collections::VecDeque,
     fs,
     path::PathBuf,
     sync::mpsc::Receiver,
@@ -13,23 +14,32 @@ use eframe::{
 };
 use widno::{
     archive,
-    cache::ImageCache,
+    cache::{ImageCache, DEFAULT_CAPACITY},
     media,
     metadata::{format_metadata, HEADER_HEIGHT},
+    settings::{Settings, IMAGE_FORMATS},
     viewer::{
         is_supported_image_path, load_archive_entry_async, load_image_async_with_password,
-        load_pdf_page_async, next_index, pan_for_drag, reset_view, zoom_pan_for_cursor, zoom_step,
-        LoadedImage, ViewerError,
+        load_pdf_page_async, next_index, pan_for_drag, pan_for_resize, reset_view,
+        smart_texture_dimensions, zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
     },
     window::{
-        should_process_snap, should_restore_before_snap, snap_action, Rect, SnapAction,
-        SnapDirection,
+        is_fullscreen, mark_native_maximized, native_snap_style, should_restore_before_snap,
+        snap_action, Rect, SnapAction, SnapDirection,
     },
 };
 
 type WindowsSnapDirection = SnapDirection;
 
 #[cfg(windows)]
+#[allow(dead_code)]
+static SNAP_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+#[allow(dead_code)]
+static WIN_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+#[allow(dead_code)]
 fn windows_snap_direction() -> Option<WindowsSnapDirection> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
@@ -48,11 +58,13 @@ fn windows_snap_direction() -> Option<WindowsSnapDirection> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn windows_snap_direction() -> Option<WindowsSnapDirection> {
     None
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn apply_windows_snap(
     direction: WindowsSnapDirection,
     current_override: Option<Rect>,
@@ -105,12 +117,13 @@ fn apply_windows_snap(
         ),
         direction,
     );
-    if matches!(action, SnapAction::Minimize) {
-        unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
-        return Some(current);
-    }
-    let SnapAction::Rect(target) = action else {
-        return Some(current);
+    let target = match action {
+        SnapAction::Rect(target) => target,
+        SnapAction::Minimize => {
+            unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+            return Some(current);
+        }
+        SnapAction::Noop => return Some(current),
     };
     let is_minimized = unsafe { IsIconic(hwnd) != 0 };
     unsafe {
@@ -176,22 +189,77 @@ fn focus_widno_window(hwnd: windows_sys::Win32::Foundation::HWND) {
 
 #[cfg(windows)]
 fn maximize_widno_window() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MAXIMIZE};
-
     let hwnd = widno_window_handle();
     if !hwnd.is_null() {
-        unsafe {
-            ShowWindow(hwnd, SW_MAXIMIZE);
-        }
+        sync_native_maximized_placement(hwnd);
         focus_widno_window(hwnd);
     }
 }
+
+#[cfg(windows)]
+fn sync_native_maximized_placement(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, GetWindowPlacement, SetWindowLongPtrW, SetWindowPlacement, ShowWindow,
+        GWL_STYLE, SW_MAXIMIZE, WINDOWPLACEMENT,
+    };
+
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        flags: 0,
+        showCmd: SW_MAXIMIZE as u32,
+        ptMinPosition: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+        ptMaxPosition: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+        rcNormalPosition: windows_sys::Win32::Foundation::RECT::default(),
+    };
+    unsafe {
+        if GetWindowPlacement(hwnd, &mut placement) != 0 {
+            placement.showCmd = SW_MAXIMIZE as u32;
+            SetWindowPlacement(hwnd, &placement);
+        }
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, mark_native_maximized(style) as isize);
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+}
+
+#[cfg(windows)]
+fn configure_native_snap_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    let hwnd = widno_window_handle();
+    if !hwnd.is_null() {
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+        let new_style = native_snap_style(style);
+        if style != new_style {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, new_style as isize);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+        sync_native_maximized_placement(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_native_snap_window() {}
 
 #[cfg(not(windows))]
 fn maximize_widno_window() {}
 
 #[cfg(windows)]
-fn start_minimized_snap_monitor(ctx: egui::Context) {
+#[allow(dead_code)]
+fn start_minimized_snap_monitor() {
     use std::{thread, time::Duration};
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
@@ -201,16 +269,30 @@ fn start_minimized_snap_monitor(ctx: egui::Context) {
         },
         UI::WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, SetWindowsHookExW, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_SYSKEYDOWN,
+            WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     };
 
+    start_windows_snap_polling();
+
     unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
-        if code >= 0 && (message == WM_KEYDOWN as usize || message == WM_SYSKEYDOWN as usize) {
+        if code >= 0 {
             let event = unsafe { *(data as *const KBDLLHOOKSTRUCT) };
-            let win_down = unsafe {
-                GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0
-            };
+            let is_win = event.vkCode == VK_LWIN as u32 || event.vkCode == VK_RWIN as u32;
+            let is_key_down = message == WM_KEYDOWN as usize || message == WM_SYSKEYDOWN as usize;
+            let is_key_up = message == WM_KEYUP as usize || message == WM_SYSKEYUP as usize;
+            if is_win && is_key_down {
+                WIN_HELD.store(true, std::sync::atomic::Ordering::Release);
+            } else if is_win && is_key_up {
+                WIN_HELD.store(false, std::sync::atomic::Ordering::Release);
+            }
+            if !is_key_down {
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
+            }
+            let win_down = WIN_HELD.load(std::sync::atomic::Ordering::Acquire)
+                || unsafe {
+                    GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0
+                };
             let direction = match event.vkCode {
                 key if key == VK_LEFT as u32 => Some(WindowsSnapDirection::Left),
                 key if key == VK_RIGHT as u32 => Some(WindowsSnapDirection::Right),
@@ -220,12 +302,30 @@ fn start_minimized_snap_monitor(ctx: egui::Context) {
             };
             if win_down {
                 if let Some(direction) = direction {
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_millis(250));
-                        if widno_is_minimized() {
+                    if direction == WindowsSnapDirection::Up
+                        && widno_is_foreground()
+                        && widno_is_fullscreen()
+                    {
+                        return 1;
+                    }
+                    let should_defer = widno_is_minimized() || widno_is_foreground();
+                    if should_defer
+                        && SNAP_PENDING
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                    {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(250));
                             let _ = apply_windows_snap(direction, None);
-                        }
-                    });
+                            SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
+                        });
+                        return 1;
+                    }
                 }
             }
         }
@@ -250,10 +350,6 @@ fn start_minimized_snap_monitor(ctx: egui::Context) {
             if result <= 0 {
                 break;
             }
-            for _ in 0..5 {
-                ctx.request_repaint();
-                thread::sleep(Duration::from_millis(50));
-            }
         }
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
@@ -261,10 +357,177 @@ fn start_minimized_snap_monitor(ctx: egui::Context) {
     });
 }
 
-#[cfg(not(windows))]
-fn start_minimized_snap_monitor(_ctx: egui::Context) {}
+#[cfg(windows)]
+#[allow(dead_code)]
+fn start_windows_snap_polling() {
+    use std::{thread, time::Duration};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_DOWN, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_UP,
+    };
+
+    thread::spawn(|| {
+        let mut armed = true;
+        let mut was_foreground = false;
+        let mut last_visible_rect = None;
+        loop {
+            let minimized = widno_is_minimized();
+            if !minimized && widno_is_foreground() {
+                was_foreground = true;
+                last_visible_rect = current_widno_rect();
+            }
+            if minimized && was_foreground {
+                if let Some(current) = last_visible_rect.take() {
+                    if SNAP_PENDING
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(60));
+                            let _ = apply_windows_snap(WindowsSnapDirection::Down, Some(current));
+                            SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
+                        });
+                    }
+                }
+                was_foreground = false;
+            }
+            let win_down = unsafe {
+                GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0
+            };
+            let direction = if win_down {
+                [
+                    (VK_LEFT, WindowsSnapDirection::Left),
+                    (VK_RIGHT, WindowsSnapDirection::Right),
+                    (VK_UP, WindowsSnapDirection::Up),
+                    (VK_DOWN, WindowsSnapDirection::Down),
+                ]
+                .into_iter()
+                .find_map(|(key, direction)| unsafe {
+                    (GetAsyncKeyState(key as i32) < 0).then_some(direction)
+                })
+            } else {
+                None
+            };
+            if direction.is_none() {
+                armed = true;
+            } else if let Some(direction) = direction {
+                if armed && widno_is_foreground() {
+                    if let Some(current) = current_widno_rect() {
+                        if SNAP_PENDING
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            thread::spawn(move || {
+                                thread::sleep(Duration::from_millis(60));
+                                let _ = apply_windows_snap(direction, Some(current));
+                                SNAP_PENDING.store(false, std::sync::atomic::Ordering::Release);
+                            });
+                        }
+                    }
+                    armed = false;
+                }
+            }
+            thread::sleep(Duration::from_millis(8));
+        }
+    });
+}
 
 #[cfg(windows)]
+#[allow(dead_code)]
+fn current_widno_rect() -> Option<Rect> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let hwnd = widno_window_handle();
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut rect = windows_sys::Win32::Foundation::RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return None;
+    }
+    Some(Rect::new(rect.left, rect.top, rect.right, rect.bottom))
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+fn widno_is_fullscreen() -> bool {
+    use windows_sys::Win32::{
+        Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        },
+        UI::WindowsAndMessaging::GetWindowRect,
+    };
+
+    let hwnd = widno_window_handle();
+    if hwnd.is_null() {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return false;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: windows_sys::Win32::Foundation::RECT::default(),
+        rcWork: windows_sys::Win32::Foundation::RECT::default(),
+        dwFlags: 0,
+    };
+    let mut current = windows_sys::Win32::Foundation::RECT::default();
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0
+        || unsafe { GetWindowRect(hwnd, &mut current) } == 0
+    {
+        return false;
+    }
+    is_fullscreen(
+        Rect::new(current.left, current.top, current.right, current.bottom),
+        Rect::new(
+            info.rcWork.left,
+            info.rcWork.top,
+            info.rcWork.right,
+            info.rcWork.bottom,
+        ),
+    )
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+fn start_minimized_snap_monitor() {}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+fn widno_is_foreground() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return false;
+    }
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(foreground, &mut process_id);
+    }
+    process_id == std::process::id()
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+fn widno_is_foreground() -> bool {
+    false
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
 fn widno_is_minimized() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
@@ -273,6 +536,7 @@ fn widno_is_minimized() -> bool {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn widno_is_minimized() -> bool {
     false
 }
@@ -306,6 +570,7 @@ fn widno_window_handle() -> windows_sys::Win32::Foundation::HWND {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn apply_windows_snap(
     _direction: WindowsSnapDirection,
     _current_override: Option<Rect>,
@@ -316,6 +581,7 @@ fn apply_windows_snap(
 struct WidnoApp {
     image: Option<LoadedImage>,
     texture: Option<TextureHandle>,
+    texture_cache: VecDeque<(PathBuf, TextureHandle)>,
     loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
     pending_path: Option<PathBuf>,
     password: String,
@@ -340,23 +606,26 @@ struct WidnoApp {
     drag_start_pointer: Option<Pos2>,
     chrome_visible: bool,
     last_input: Instant,
-    fullscreen: bool,
     image_cache: ImageCache,
     cache_key: Option<PathBuf>,
     prefetch_loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
     prefetch_key: Option<PathBuf>,
-    last_windows_snap: Instant,
-    windows_snap_armed: bool,
-    last_snap_rect: Option<Rect>,
     startup_maximized: bool,
-    snap_monitor_started: bool,
+    native_snap_configured: bool,
+    settings: Settings,
+    settings_path: PathBuf,
+    settings_open: bool,
+    last_viewport_size: Option<Vec2>,
 }
 
 impl WidnoApp {
     fn new(cc: &CreationContext<'_>) -> Self {
+        let (settings, settings_path) = Settings::load();
+        let settings_open = !settings.initialized;
         let mut app = Self {
             image: None,
             texture: None,
+            texture_cache: VecDeque::new(),
             loading: None,
             pending_path: None,
             password: String::new(),
@@ -381,16 +650,16 @@ impl WidnoApp {
             drag_start_pointer: None,
             chrome_visible: true,
             last_input: Instant::now(),
-            fullscreen: false,
-            image_cache: ImageCache::new(2),
+            image_cache: ImageCache::new(DEFAULT_CAPACITY),
             cache_key: None,
             prefetch_loading: None,
             prefetch_key: None,
-            last_windows_snap: Instant::now() - Duration::from_secs(1),
-            windows_snap_armed: true,
-            last_snap_rect: None,
             startup_maximized: true,
-            snap_monitor_started: false,
+            native_snap_configured: false,
+            settings,
+            settings_path,
+            settings_open,
+            last_viewport_size: None,
         };
 
         if let Some(path) = std::env::args_os().nth(1) {
@@ -463,7 +732,16 @@ impl WidnoApp {
         } else {
             None
         };
-        self.loading = Some(load_image_async_with_password(path, password));
+        self.loading = if self
+            .cache_key
+            .as_deref()
+            .and_then(|key| self.image_cache.get(key))
+            .is_some()
+        {
+            None
+        } else {
+            Some(load_image_async_with_password(path, password))
+        };
         self.last_input = Instant::now();
     }
 
@@ -485,11 +763,20 @@ impl WidnoApp {
         self.prefetch_loading = None;
         self.prefetch_key = None;
         self.cache_key = Some(PathBuf::from(format!("{}::{}", path.display(), entry.name)));
-        self.loading = Some(load_archive_entry_async(
-            path,
-            entry,
-            self.archive_password.clone(),
-        ));
+        self.loading = if self
+            .cache_key
+            .as_deref()
+            .and_then(|key| self.image_cache.get(key))
+            .is_some()
+        {
+            None
+        } else {
+            Some(load_archive_entry_async(
+                path,
+                entry,
+                self.archive_password.clone(),
+            ))
+        };
         self.last_input = Instant::now();
     }
 
@@ -552,17 +839,64 @@ impl WidnoApp {
         }
     }
 
+    fn cached_texture(&mut self, key: &PathBuf) -> Option<TextureHandle> {
+        let index = self
+            .texture_cache
+            .iter()
+            .position(|(cached_key, _)| cached_key == key)?;
+        let entry = self.texture_cache.remove(index)?;
+        let texture = entry.1.clone();
+        self.texture_cache.push_back(entry);
+        Some(texture)
+    }
+
+    fn cache_texture(&mut self, key: PathBuf, texture: TextureHandle) {
+        if let Some(index) = self
+            .texture_cache
+            .iter()
+            .position(|(cached_key, _)| cached_key == &key)
+        {
+            self.texture_cache.remove(index);
+        }
+        self.texture_cache.push_back((key, texture));
+        while self.texture_cache.len() > DEFAULT_CAPACITY {
+            self.texture_cache.pop_front();
+        }
+    }
+
     fn install_loaded_image(&mut self, ctx: &egui::Context, image: LoadedImage) {
         let archive_entry = image.archive_entry.clone();
         let archive_entries = image.archive_entries.clone();
-        let rgba = image.image.to_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-        self.texture = Some(ctx.load_texture(
-            image.source.to_string_lossy(),
-            color_image,
-            TextureOptions::LINEAR,
-        ));
+        let texture = if let Some(texture) = self.cached_texture(&image.source) {
+            texture
+        } else {
+            let native_dimensions = (image.image.width(), image.image.height());
+            let viewport = ctx.screen_rect().size();
+            let texture_dimensions = smart_texture_dimensions(
+                native_dimensions,
+                (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32),
+            );
+            let texture_image = if texture_dimensions != native_dimensions {
+                image.image.resize(
+                    texture_dimensions.0,
+                    texture_dimensions.1,
+                    image::imageops::FilterType::Triangle,
+                )
+            } else {
+                image.image.as_ref().clone()
+            };
+            let rgba = texture_image.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            let texture = ctx.load_texture(
+                image.source.to_string_lossy(),
+                color_image,
+                TextureOptions::LINEAR,
+            );
+            self.cache_texture(image.source.clone(), texture.clone());
+            texture
+        };
+        self.texture = Some(texture);
         self.image_cache
             .insert(image.source.clone(), image.image.clone());
         self.image = Some(image);
@@ -636,25 +970,18 @@ impl WidnoApp {
         let mut changed = false;
         let mut navigation = 0;
         let mut save_requested = false;
-        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(false));
-        let minimized = widno_is_minimized();
-        let snap_direction = should_process_snap(focused, minimized)
-            .then(windows_snap_direction)
-            .flatten();
-        if snap_direction.is_none() {
-            self.windows_snap_armed = true;
-        }
-        if should_process_snap(focused, minimized)
-            && self.windows_snap_armed
-            && self.last_windows_snap.elapsed() >= Duration::from_millis(250)
-        {
-            if let Some(direction) = snap_direction {
-                self.fullscreen = false;
-                self.last_windows_snap = Instant::now();
-                self.windows_snap_armed = false;
-                self.last_snap_rect = apply_windows_snap(direction, self.last_snap_rect);
+        let viewport = ctx.screen_rect().size();
+        if let Some(previous) = self.last_viewport_size {
+            if !self.fit_to_window && (previous - viewport).length_sq() > f32::EPSILON {
+                let pan = pan_for_resize(
+                    (self.pan.x, self.pan.y),
+                    (previous.x, previous.y),
+                    (viewport.x, viewport.y),
+                );
+                self.pan = Vec2::new(pan.0, pan.1);
             }
         }
+        self.last_viewport_size = Some(viewport);
         ctx.input(|input| {
             if input.key_pressed(Key::Escape) {
                 std::process::exit(0);
@@ -708,6 +1035,10 @@ impl WidnoApp {
             }
             if input.modifiers.ctrl && input.key_pressed(Key::S) {
                 save_requested = true;
+            }
+            if input.modifiers.ctrl && input.key_pressed(Key::P) {
+                self.settings_open = true;
+                changed = true;
             }
             if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
                 navigation = 1;
@@ -839,6 +1170,60 @@ impl WidnoApp {
         }
     }
 
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut save = false;
+        egui::Window::new("Настройки Widno")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.heading("Open files with Widno by default");
+                ui.label("Выберите форматы изображений для Widno и OpenWithProgids.");
+                ui.separator();
+                ui.columns(3, |columns| {
+                    for (index, extension) in IMAGE_FORMATS.iter().enumerate() {
+                        let enabled = self
+                            .settings
+                            .enabled_formats
+                            .entry((*extension).to_string())
+                            .or_insert(true);
+                        columns[index % 3].checkbox(enabled, *extension);
+                    }
+                });
+                ui.separator();
+                ui.heading("Add Widno to context menu");
+                ui.checkbox(&mut self.settings.context_files, "Files");
+                ui.checkbox(&mut self.settings.context_archives, "Archives");
+                ui.checkbox(&mut self.settings.context_folders, "Folders");
+                ui.separator();
+                ui.label("Изменение приложения по умолчанию выполняется только после подтверждения Windows.");
+                if ui.button("Открыть настройки приложений Windows").clicked() {
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/C", "start", "", "ms-settings:defaultapps"])
+                            .spawn();
+                    }
+                }
+                if ui.button("Сохранить").clicked() {
+                    save = true;
+                }
+            });
+        if save {
+            self.settings.initialized = true;
+            if let Err(error) = widno::settings::apply_default_associations(&self.settings) {
+                self.error = Some(format!("Не удалось применить ассоциации: {error}"));
+            }
+            if let Err(error) = self.settings.save(&self.settings_path) {
+                self.error = Some(format!("Не удалось сохранить настройки: {error}"));
+            }
+            self.settings_open = false;
+        }
+    }
+
     fn metadata_text(&self) -> String {
         let dimensions = self
             .image
@@ -854,22 +1239,16 @@ impl WidnoApp {
         } else {
             format!("{}/{}", self.current_index + 1, self.siblings.len())
         };
-        format_metadata(
-            &self.metadata_name,
-            dimensions,
-            self.metadata_size,
-            &position,
-            self.zoom,
-        )
+        format_metadata(dimensions, self.metadata_size, &position, self.zoom)
     }
 }
 
 impl App for WidnoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.poll_image(ctx);
-        if !self.snap_monitor_started {
-            start_minimized_snap_monitor(ctx.clone());
-            self.snap_monitor_started = true;
+        if !self.native_snap_configured {
+            configure_native_snap_window();
+            self.native_snap_configured = true;
         }
         if self.startup_maximized {
             maximize_widno_window();
@@ -1009,6 +1388,8 @@ impl App for WidnoApp {
                         });
                 }
             });
+
+        self.show_settings(ctx);
 
         if let Some(path) = retry_path {
             self.request_image_with_password(path, Some(self.password.clone()));

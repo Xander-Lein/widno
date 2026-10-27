@@ -2,6 +2,7 @@ pub mod archive;
 pub mod cache;
 pub mod media;
 pub mod metadata;
+pub mod settings;
 pub mod viewer;
 pub mod window;
 
@@ -16,11 +17,16 @@ mod tests {
 
     use crate::cache::ImageCache;
     use crate::metadata::{format_metadata, HEADER_HEIGHT};
+    use crate::settings::Settings;
     use crate::viewer::{
-        is_supported_image_path, next_index, pan_for_drag, reset_view, zoom_pan_for_cursor,
-        zoom_step, ZoomMode,
+        is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
+        smart_texture_dimensions, zoom_pan_for_cursor, zoom_step, ZoomMode,
     };
-    use crate::window::{snap_action, snap_rect, Rect, SnapAction, SnapDirection};
+    use crate::window::{
+        is_fullscreen, mark_native_maximized, native_snap_style, snap_action, snap_rect, Rect,
+        SnapAction, SnapDirection, WS_CAPTION, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_SYSMENU, WS_THICKFRAME,
+    };
     use crate::{archive::ArchiveKind, media::is_raw_path};
     use std::sync::Arc;
 
@@ -28,7 +34,51 @@ mod tests {
     fn recognizes_common_image_extensions_case_insensitively() {
         assert!(is_supported_image_path(Path::new("photo.JPEG")));
         assert!(is_supported_image_path(Path::new("scan.tiff")));
+        assert!(is_supported_image_path(Path::new("camera.CR3")));
+        assert!(is_supported_image_path(Path::new("icon.svg")));
         assert!(!is_supported_image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn renders_static_svg_without_external_resources() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("icon.svg");
+        std::fs::write(
+            &path,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"><rect width="8" height="4" fill="red"/></svg>"#,
+        )
+        .expect("write svg");
+        let image = crate::media::svg_preview(&path).expect("render svg");
+        assert_eq!(image.dimensions(), (8, 4));
+    }
+
+    #[test]
+    fn smart_downscaling_caps_texture_to_two_viewport_dimensions() {
+        assert_eq!(
+            smart_texture_dimensions((8000, 6000), (1920, 1080)),
+            (3840, 2880)
+        );
+        assert_eq!(
+            smart_texture_dimensions((1200, 800), (1920, 1080)),
+            (1200, 800)
+        );
+    }
+
+    #[test]
+    fn settings_default_allows_images_and_archives_and_round_trips() {
+        let settings = Settings::default();
+        assert!(settings.enabled_formats[".svg"]);
+        assert!(!settings.enabled_formats.contains_key(".rar"));
+        assert!(settings.context_files);
+        assert!(settings.context_archives);
+        assert!(settings.context_folders);
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("settings.json");
+        settings.save(&path).expect("save settings");
+        let loaded: Settings =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read settings"))
+                .expect("parse settings");
+        assert_eq!(loaded.enabled_formats, settings.enabled_formats);
     }
 
     #[test]
@@ -39,12 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_metadata_without_a_second_source_line() {
+    fn formats_metadata_without_a_filename() {
         assert_eq!(
-            format_metadata("photo.jpg", (1920, 1080), 1536, "2/7", 1.0),
-            "photo.jpg  |  1920×1080  |  1.5 KB  |  2/7  |  zoom 100%"
+            format_metadata((1920, 1080), 1536, "2/7", 1.0),
+            "1920×1080  |  1.5 KB  |  2/7  |  zoom 100%"
         );
-        assert!(format_metadata("large.jpg", (1, 1), 1_000_000, "1/1", 1.0).contains("1.0 MB"));
+        assert!(format_metadata((1, 1), 1_000_000, "1/1", 1.0).contains("1.0 MB"));
     }
 
     #[test]
@@ -109,12 +159,124 @@ mod tests {
         );
         assert_eq!(
             snap_action(work, work, SnapDirection::Down),
-            SnapAction::Minimize
+            SnapAction::Rect(Rect::new(0, 540, 1920, 1080))
         );
         assert_eq!(
             snap_action(Rect::new(0, 0, 960, 540), work, SnapDirection::Up),
             SnapAction::Rect(work)
         );
+        assert_eq!(snap_action(work, work, SnapDirection::Up), SnapAction::Noop);
+        assert_eq!(
+            snap_action(Rect::new(0, 0, 960, 1080), work, SnapDirection::Left),
+            SnapAction::Noop
+        );
+    }
+
+    #[test]
+    fn fullscreen_is_exactly_the_work_area() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        assert!(is_fullscreen(work, work));
+        assert!(!is_fullscreen(Rect::new(0, 0, 960, 1080), work));
+    }
+
+    #[test]
+    fn native_snap_style_keeps_window_borderless_but_snap_capable() {
+        let style = native_snap_style(WS_CAPTION | WS_SYSMENU);
+        assert_eq!(style & (WS_CAPTION | WS_SYSMENU), 0);
+        assert_ne!(style & WS_THICKFRAME, 0);
+        assert_ne!(style & WS_MINIMIZEBOX, 0);
+        assert_ne!(style & WS_MAXIMIZEBOX, 0);
+    }
+
+    #[test]
+    fn native_maximized_state_is_explicitly_marked() {
+        assert_ne!(mark_native_maximized(0) & WS_MAXIMIZE, 0);
+    }
+
+    #[test]
+    fn window_snap_moves_between_corners_without_expanding_to_a_half() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        let top_half = Rect::new(0, 0, 1920, 540);
+        let bottom_half = Rect::new(0, 540, 1920, 1080);
+        assert_eq!(
+            snap_rect(top_half, work, SnapDirection::Left),
+            Rect::new(0, 0, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(top_half, work, SnapDirection::Right),
+            Rect::new(960, 0, 1920, 540)
+        );
+        assert_eq!(snap_rect(top_half, work, SnapDirection::Up), work);
+        assert_eq!(
+            snap_rect(Rect::new(0, 0, 960, 540), work, SnapDirection::Right),
+            top_half
+        );
+        assert_eq!(
+            snap_rect(Rect::new(960, 0, 1920, 540), work, SnapDirection::Down),
+            Rect::new(960, 0, 1920, 1080)
+        );
+        assert_eq!(
+            snap_rect(Rect::new(0, 540, 960, 1080), work, SnapDirection::Right),
+            bottom_half
+        );
+        assert_eq!(snap_rect(bottom_half, work, SnapDirection::Up), top_half);
+        assert_eq!(
+            snap_rect(bottom_half, work, SnapDirection::Left),
+            Rect::new(0, 540, 960, 1080)
+        );
+        assert_eq!(
+            snap_rect(bottom_half, work, SnapDirection::Right),
+            Rect::new(960, 540, 1920, 1080)
+        );
+        assert_eq!(
+            snap_rect(Rect::new(0, 540, 960, 1080), work, SnapDirection::Up),
+            Rect::new(0, 0, 960, 1080)
+        );
+    }
+
+    #[test]
+    fn corner_returns_to_its_side_half_with_vertical_arrow() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(
+            snap_rect(Rect::new(0, 0, 960, 540), work, SnapDirection::Down),
+            Rect::new(0, 0, 960, 1080)
+        );
+        assert_eq!(
+            snap_rect(Rect::new(960, 540, 1920, 1080), work, SnapDirection::Up),
+            Rect::new(960, 0, 1920, 1080)
+        );
+    }
+
+    #[test]
+    fn snap_never_creates_a_full_width_top_half() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        let top_half = Rect::new(0, 0, 1920, 540);
+        assert_ne!(snap_rect(work, work, SnapDirection::Up), top_half);
+        assert_ne!(
+            snap_rect(Rect::new(0, 0, 960, 1080), work, SnapDirection::Up),
+            top_half
+        );
+    }
+
+    #[test]
+    fn image_cache_default_capacity_keeps_a_session_working_set() {
+        assert_eq!(crate::cache::DEFAULT_CAPACITY, 8);
+        assert_eq!(crate::cache::DEFAULT_MAX_BYTES, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn image_cache_evicts_least_recently_used_entries_by_bytes() {
+        let mut cache = ImageCache::with_limits(8, 12);
+        cache.insert(
+            Path::new("first.png").to_path_buf(),
+            Arc::new(image::DynamicImage::new_rgb8(2, 2)),
+        );
+        cache.insert(
+            Path::new("second.png").to_path_buf(),
+            Arc::new(image::DynamicImage::new_rgb8(2, 2)),
+        );
+        assert!(cache.get(Path::new("first.png")).is_none());
+        assert!(cache.current_bytes() <= 12);
     }
 
     #[test]
@@ -139,6 +301,14 @@ mod tests {
     }
 
     #[test]
+    fn resize_preserves_the_image_point_at_the_viewport_center() {
+        assert_eq!(
+            pan_for_resize((120.0, -40.0), (1920.0, 1080.0), (1280.0, 720.0)),
+            (440.0, 140.0)
+        );
+    }
+
+    #[test]
     fn ctrl_zero_resets_zoom_and_pan() {
         assert_eq!(reset_view(), ((0.0, 0.0), 1.0));
     }
@@ -150,6 +320,15 @@ mod tests {
             Some(ArchiveKind::SevenZip)
         );
         assert!(is_raw_path(Path::new("camera.CR3")));
+    }
+
+    #[cfg(not(feature = "pdf"))]
+    #[test]
+    fn pdf_support_is_explicitly_disabled_in_default_build() {
+        assert!(!crate::media::pdf_runtime_available());
+        let error = crate::media::render_pdf_first_page(Path::new("fixture.pdf"))
+            .expect_err("default build must not claim PDF support");
+        assert!(error.to_string().contains("PDF support is disabled"));
     }
 
     #[test]

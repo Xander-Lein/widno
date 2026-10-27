@@ -10,11 +10,15 @@
 - drag-and-drop и путь к файлу первым аргументом;
 - fit-to-window, 100%, zoom клавишами `+`/`-`, fullscreen `F11`;
 - навигационная модель с циклическим переходом;
-- common image formats через `image`;
-- открытие первого изображения из ZIP, 7z и RAR без ручного извлечения;
+- common image formats через `image`: JPEG, PNG, GIF, BMP, TIFF, WebP, ICO и PNM/TGA;
+- безопасный статический просмотр SVG;
+- виртуальный просмотр изображений из ZIP, 7z и RAR без ручного извлечения;
 - RAW preview через `rawloader`;
-- PDF first-page rendering через PDFium runtime;
-- EXIF extraction API.
+- опциональный PDF first-page rendering через PDFium runtime;
+- EXIF extraction API;
+- frameless borderless-окно с native Windows Snap (`Win` + стрелки), без глобального low-level keyboard hook;
+- Ctrl+P: настройки форматов по умолчанию и пунктов Widno в контекстном меню;
+- RAM-only LRU-кэш изображений с предварительной загрузкой следующего файла.
 
 ## Сборка
 
@@ -23,8 +27,23 @@ cargo test
 cargo run --release -- path\to\image.jpg
 ```
 
-Для PDF положите совместимый `pdfium.dll` рядом с приложением или задайте
-`WIDNO_PDFIUM_PATH` каталогом, в котором он находится.
+PDF отключён в стандартной Windows-сборке, чтобы не увеличивать размер и
+время запуска приложения. Для отдельной сборки с PDF используйте
+`--features pdf` и положите совместимый `pdfium.dll` рядом с приложением или
+задайте `WIDNO_PDFIUM_PATH` каталогом, в котором он находится.
+
+При первом запуске откроются настройки. Их можно открыть повторно сочетанием
+`Ctrl+P`. Widno не перезаписывает существующий `UserChoice` Windows для
+приложения по умолчанию; выбор default-приложения подтверждается пользователем
+через системные настройки Windows.
+
+Для регистрации `Open with Widno` запустите PowerShell-скрипт от имени текущего
+пользователя:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-file-associations.ps1 `
+  -Binary .\target\release\widno.exe
+```
 
 ## Ограничения
 

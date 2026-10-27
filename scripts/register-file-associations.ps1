@@ -7,10 +7,13 @@ param(
 $resolvedBinary = (Resolve-Path $Binary).Path
 $classesRoot = 'HKCU:\Software\Classes'
 $progId = 'Widno.ImageFile'
-$extensions = @(
+$imageExtensions = @(
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tif', '.tiff', '.webp',
-    '.zip', '.rar', '.7z'
+    '.arw', '.cr2', '.cr3', '.crw', '.dng', '.mrw', '.nef', '.nrw',
+    '.orf', '.pef', '.raf', '.rwl', '.rw2', '.sr2', '.srf', '.srw', '.x3f'
 )
+$archiveExtensions = @('.zip', '.rar', '.7z')
+$browseExtensions = $imageExtensions + $archiveExtensions
 
 $progIdKey = Join-Path $classesRoot $progId
 $iconKey = Join-Path $progIdKey 'DefaultIcon'
@@ -44,15 +47,52 @@ if ($PSCmdlet.ShouldProcess($applicationKey, 'Register widno.exe in Open With'))
     New-ItemProperty -Path $applicationKey -Name 'FriendlyAppName' -Value 'widno' -PropertyType String -Force | Out-Null
 }
 
-foreach ($extension in $extensions) {
+function Set-DefaultIfUnclaimed([string]$Extension) {
+    $extensionKey = Join-Path $classesRoot $Extension
+    $userChoiceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoice"
+    New-Item -Path $extensionKey -Force | Out-Null
+    $current = (Get-ItemProperty -Path $extensionKey -Name '(default)' -ErrorAction SilentlyContinue).'(default)'
+    if (-not (Test-Path $userChoiceKey) -and [string]::IsNullOrWhiteSpace($current)) {
+        Set-DefaultRegistryValue $extensionKey $progId "Set Widno default for $Extension"
+    }
+}
+
+function Add-BrowseCommand([string]$Extension) {
     $extensionKey = Join-Path $classesRoot $extension
+    $systemAssociationKey = Join-Path $classesRoot "SystemFileAssociations\$Extension"
     if ($PSCmdlet.ShouldProcess($extensionKey, "Associate $extension with Widno")) {
         New-Item -Path $extensionKey -Force | Out-Null
-        Set-DefaultRegistryValue $extensionKey $progId "Associate $extension with Widno"
+        New-Item -Path $systemAssociationKey -Force | Out-Null
         $openWithProgids = Join-Path $extensionKey 'OpenWithProgids'
         New-Item -Path $openWithProgids -Force | Out-Null
         New-ItemProperty -Path $openWithProgids -Name $progId -Value '' -PropertyType String -Force | Out-Null
+        foreach ($verbRoot in @($extensionKey, $systemAssociationKey)) {
+            $verbKey = Join-Path $verbRoot 'shell\Browse with Widno'
+            $browseCommandKey = Join-Path $verbKey 'command'
+            New-Item -Path $browseCommandKey -Force | Out-Null
+            Set-DefaultRegistryValue $verbKey 'Browse with Widno' 'Set Browse with Widno label'
+            Set-DefaultRegistryValue $browseCommandKey "`"$resolvedBinary`" `"%1`"" 'Set Browse with Widno command'
+        }
     }
+}
+
+function Remove-ArchiveDefaultIfWidno([string]$Extension) {
+    $extensionKey = Join-Path $classesRoot $Extension
+    $userChoiceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoice"
+    $current = (Get-ItemProperty -Path $extensionKey -Name '(default)' -ErrorAction SilentlyContinue).'(default)'
+    if (-not (Test-Path $userChoiceKey) -and $current -eq $progId) {
+        Remove-ItemProperty -Path $extensionKey -Name '(default)' -Force -ErrorAction SilentlyContinue
+    }
+}
+
+foreach ($extension in $imageExtensions) {
+    Set-DefaultIfUnclaimed $extension
+}
+foreach ($extension in $browseExtensions) {
+    Add-BrowseCommand $extension
+}
+foreach ($extension in $archiveExtensions) {
+    Remove-ArchiveDefaultIfWidno $extension
 }
 
 if ($PSCmdlet.ShouldProcess('Explorer', 'Notify Windows about changed file associations')) {
@@ -67,5 +107,6 @@ public static class WidnoShellNotify {
     [WidnoShellNotify]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
-Write-Output "Widno associations registered for $($extensions.Count) extensions."
+Write-Output "Widno associations registered for $($browseExtensions.Count) extensions."
+Write-Output 'Existing Windows UserChoice associations were preserved.'
 Write-Output 'Restart Explorer or sign out/in if Windows still shows a cached icon.'

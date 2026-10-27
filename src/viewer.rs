@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{archive, media};
 
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+const MAX_IMAGE_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ViewerError {
@@ -35,6 +36,18 @@ pub enum ZoomMode {
 }
 
 pub const ZOOM_STEP: f32 = 0.25;
+
+pub fn smart_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u32, u32) {
+    let (width, height) = native;
+    let max_texture_dimension = u64::from(viewport.0.max(viewport.1)).saturating_mul(2);
+    let native_dimension = u64::from(width.max(height));
+    if native_dimension <= max_texture_dimension || max_texture_dimension == 0 {
+        return native;
+    }
+    let scaled_width = (u64::from(width) * max_texture_dimension / native_dimension).max(1);
+    let scaled_height = (u64::from(height) * max_texture_dimension / native_dimension).max(1);
+    (scaled_width as u32, scaled_height as u32)
+}
 
 pub fn zoom_step(current: f32, direction: i32) -> f32 {
     let current = current.clamp(0.05, 32.0);
@@ -66,6 +79,17 @@ pub fn pan_for_drag(
     )
 }
 
+pub fn pan_for_resize(
+    pan: (f32, f32),
+    previous_viewport: (f32, f32),
+    new_viewport: (f32, f32),
+) -> (f32, f32) {
+    (
+        pan.0 + (previous_viewport.0 - new_viewport.0) / 2.0,
+        pan.1 + (previous_viewport.1 - new_viewport.1) / 2.0,
+    )
+}
+
 pub fn reset_view() -> ((f32, f32), f32) {
     ((0.0, 0.0), 1.0)
 }
@@ -89,6 +113,9 @@ pub struct LoadedImage {
 }
 
 pub fn is_supported_image_path(path: &Path) -> bool {
+    if media::is_raw_path(path) || media::is_svg_path(path) {
+        return true;
+    }
     let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
         return false;
     };
@@ -139,6 +166,13 @@ pub fn next_index(current: usize, len: usize, direction: i32) -> Option<usize> {
 
 pub fn load_image(path: impl Into<PathBuf>) -> Result<LoadedImage, ViewerError> {
     let path = path.into();
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        if metadata.len() > MAX_IMAGE_FILE_BYTES {
+            return Err(ViewerError::Message(
+                "image file exceeds the 512 MiB safety limit".into(),
+            ));
+        }
+    }
     let bytes = std::fs::read(&path).map_err(|error| ViewerError::Decode {
         path: path.clone(),
         source: image::ImageError::IoError(error),
@@ -198,6 +232,18 @@ pub fn load_path_with_password(
     if media::is_raw_path(&path) {
         let image =
             media::raw_preview(&path).map_err(|error| ViewerError::Message(error.to_string()))?;
+        validate_image_size(&image)?;
+        return Ok(LoadedImage {
+            source: path,
+            image: Arc::new(image),
+            archive_entry: None,
+            archive_entries: None,
+        });
+    }
+
+    if media::is_svg_path(&path) {
+        let image =
+            media::svg_preview(&path).map_err(|error| ViewerError::Message(error.to_string()))?;
         validate_image_size(&image)?;
         return Ok(LoadedImage {
             source: path,

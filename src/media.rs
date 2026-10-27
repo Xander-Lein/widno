@@ -2,6 +2,7 @@ use std::{fs::File, io::BufReader, path::Path};
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, GrayImage, ImageBuffer, Rgba, RgbaImage};
+#[cfg(feature = "pdf")]
 use pdfium_render::prelude::*;
 
 const RAW_EXTENSIONS: &[&str] = &[
@@ -15,6 +16,30 @@ pub fn is_raw_path(path: &Path) -> bool {
         .and_then(|extension| extension.to_str())
         .map(|extension| RAW_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+pub fn is_svg_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("svg"))
+        .unwrap_or(false)
+}
+
+pub fn svg_preview(path: &Path) -> Result<DynamicImage> {
+    let data = std::fs::read(path)?;
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(&data, &options)?;
+    let size = tree.size().to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+        .context("SVG dimensions are too large")?;
+    resvg::render(
+        &tree,
+        resvg::usvg::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
+    let image = RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
+        .context("SVG renderer returned an invalid image")?;
+    Ok(DynamicImage::ImageRgba8(image))
 }
 
 pub fn is_pdf_path(path: &Path) -> bool {
@@ -81,6 +106,7 @@ pub fn read_exif(path: &Path) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+#[cfg(feature = "pdf")]
 pub fn pdf_runtime_available() -> bool {
     let directory = std::env::var_os("WIDNO_PDFIUM_PATH")
         .map(std::path::PathBuf::from)
@@ -95,16 +121,19 @@ pub fn pdf_runtime_available() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "pdf")]
 pub fn render_pdf_first_page(path: &Path) -> Result<DynamicImage> {
     render_pdf_page(path, 0)
 }
 
+#[cfg(feature = "pdf")]
 pub fn pdf_page_count(path: &Path) -> Result<usize> {
     let pdfium = bind_pdfium()?;
     let document = pdfium.load_pdf_from_file(path, None)?;
     Ok(document.pages().len() as usize)
 }
 
+#[cfg(feature = "pdf")]
 pub fn render_pdf_page(path: &Path, page_index: usize) -> Result<DynamicImage> {
     let pdfium = bind_pdfium()?;
     let document = pdfium.load_pdf_from_file(path, None)?;
@@ -122,6 +151,7 @@ pub fn render_pdf_page(path: &Path, page_index: usize) -> Result<DynamicImage> {
     Ok(rendered)
 }
 
+#[cfg(feature = "pdf")]
 fn bind_pdfium() -> Result<Pdfium> {
     let library_dir = std::env::var_os("WIDNO_PDFIUM_PATH")
         .map(std::path::PathBuf::from)
@@ -135,6 +165,26 @@ fn bind_pdfium() -> Result<Pdfium> {
     let library_name = Pdfium::pdfium_platform_library_name_at_path(&library_dir);
     let bindings = Pdfium::bind_to_library(library_name)?;
     Ok(Pdfium::new(bindings))
+}
+
+#[cfg(not(feature = "pdf"))]
+pub fn pdf_runtime_available() -> bool {
+    false
+}
+
+#[cfg(not(feature = "pdf"))]
+pub fn render_pdf_first_page(_path: &Path) -> Result<DynamicImage> {
+    anyhow::bail!("PDF support is disabled in this build")
+}
+
+#[cfg(not(feature = "pdf"))]
+pub fn pdf_page_count(_path: &Path) -> Result<usize> {
+    anyhow::bail!("PDF support is disabled in this build")
+}
+
+#[cfg(not(feature = "pdf"))]
+pub fn render_pdf_page(_path: &Path, _page_index: usize) -> Result<DynamicImage> {
+    anyhow::bail!("PDF support is disabled in this build")
 }
 
 pub fn grayscale_preview(image: &DynamicImage) -> GrayImage {

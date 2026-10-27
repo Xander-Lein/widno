@@ -1,15 +1,8 @@
 pub const HEADER_HEIGHT: f32 = 20.0;
 
-pub fn format_metadata(
-    name: &str,
-    dimensions: (u32, u32),
-    bytes: u64,
-    position: &str,
-    zoom: f32,
-) -> String {
+pub fn format_metadata(dimensions: (u32, u32), bytes: u64, position: &str, zoom: f32) -> String {
     format!(
-        "{}  |  {}×{}  |  {}  |  {}  |  zoom {:.0}%",
-        name,
+        "{}×{}  |  {}  |  {}  |  zoom {:.0}%",
         dimensions.0,
         dimensions.1,
         format_bytes(bytes),
