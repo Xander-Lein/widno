@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, GenericImageView, ImageReader};
 use thiserror::Error;
 
 use crate::{archive, media};
@@ -122,9 +122,33 @@ impl ZoomMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct PreparedTexture {
+    pub size: (u32, u32),
+    pub rgba: Vec<u8>,
+}
+
+pub fn prepare_texture(image: &DynamicImage, viewport: (u32, u32)) -> PreparedTexture {
+    let dimensions = prefetch_texture_dimensions(image.dimensions(), viewport);
+    let texture = if dimensions != image.dimensions() {
+        image.resize(
+            dimensions.0,
+            dimensions.1,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        image.clone()
+    };
+    PreparedTexture {
+        size: dimensions,
+        rgba: texture.to_rgba8().into_raw(),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LoadedImage {
     pub source: PathBuf,
     pub image: Arc<DynamicImage>,
+    pub prepared_texture: Option<PreparedTexture>,
     pub archive_entry: Option<archive::ArchiveEntry>,
     pub archive_entries: Option<Vec<archive::ArchiveEntry>>,
 }
@@ -214,6 +238,7 @@ pub fn load_image(path: impl Into<PathBuf>) -> Result<LoadedImage, ViewerError> 
     Ok(LoadedImage {
         source: path,
         image: Arc::new(image),
+        prepared_texture: None,
         archive_entry: None,
         archive_entries: None,
     })
@@ -241,6 +266,7 @@ pub fn load_path_with_password(
         return Ok(LoadedImage {
             source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
             image: Arc::new(image),
+            prepared_texture: None,
             archive_entry: Some(entry.clone()),
             archive_entries: Some(entries),
         });
@@ -253,6 +279,7 @@ pub fn load_path_with_password(
         return Ok(LoadedImage {
             source: path,
             image: Arc::new(image),
+            prepared_texture: None,
             archive_entry: None,
             archive_entries: None,
         });
@@ -265,6 +292,7 @@ pub fn load_path_with_password(
         return Ok(LoadedImage {
             source: path,
             image: Arc::new(image),
+            prepared_texture: None,
             archive_entry: None,
             archive_entries: None,
         });
@@ -277,6 +305,7 @@ pub fn load_path_with_password(
         return Ok(LoadedImage {
             source: path,
             image: Arc::new(image),
+            prepared_texture: None,
             archive_entry: None,
             archive_entries: None,
         });
@@ -303,9 +332,23 @@ pub fn load_image_async_with_password(
     path: PathBuf,
     password: Option<String>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
+    load_image_async_with_password_for_viewport(path, password, None)
+}
+
+pub fn load_image_async_with_password_for_viewport(
+    path: PathBuf,
+    password: Option<String>,
+    viewport: Option<(u32, u32)>,
+) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let _ = sender.send(load_path_with_password(path, password.as_deref()));
+        let result = load_path_with_password(path, password.as_deref()).map(|mut image| {
+            if let Some(viewport) = viewport {
+                image.prepared_texture = Some(prepare_texture(&image.image, viewport));
+            }
+            image
+        });
+        let _ = sender.send(result);
     });
     receiver
 }
@@ -314,6 +357,15 @@ pub fn load_archive_entry_async(
     path: PathBuf,
     entry: archive::ArchiveEntry,
     password: Option<String>,
+) -> Receiver<Result<LoadedImage, ViewerError>> {
+    load_archive_entry_async_for_viewport(path, entry, password, None)
+}
+
+pub fn load_archive_entry_async_for_viewport(
+    path: PathBuf,
+    entry: archive::ArchiveEntry,
+    password: Option<String>,
+    viewport: Option<(u32, u32)>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -324,9 +376,16 @@ pub fn load_archive_entry_async(
                 Ok(LoadedImage {
                     source: PathBuf::from(format!("{}::{}", path.display(), entry.name)),
                     image: Arc::new(image),
+                    prepared_texture: None,
                     archive_entry: Some(entry),
                     archive_entries: None,
                 })
+            })
+            .map(|mut image| {
+                if let Some(viewport) = viewport {
+                    image.prepared_texture = Some(prepare_texture(&image.image, viewport));
+                }
+                image
             });
         let _ = sender.send(result);
     });
@@ -346,6 +405,7 @@ pub fn load_pdf_page_async(
                 Ok(LoadedImage {
                     source: path,
                     image: Arc::new(image),
+                    prepared_texture: None,
                     archive_entry: None,
                     archive_entries: None,
                 })

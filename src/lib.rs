@@ -75,6 +75,14 @@ mod tests {
     }
 
     #[test]
+    fn prepared_texture_contains_viewport_bounded_rgba_pixels() {
+        let image = image::DynamicImage::new_rgba8(8000, 6000);
+        let prepared = crate::viewer::prepare_texture(&image, (1920, 1080));
+        assert_eq!(prepared.size, (3840, 2880));
+        assert_eq!(prepared.rgba.len(), 3840 * 2880 * 4);
+    }
+
+    #[test]
     fn settings_default_allows_images_and_archives_and_round_trips() {
         let settings = Settings::default();
         assert!(settings.enabled_formats[".svg"]);
