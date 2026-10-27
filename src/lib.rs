@@ -20,8 +20,7 @@ mod tests {
     use crate::settings::{context_extensions, Settings};
     use crate::viewer::{
         is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
-        prefetch_texture_dimensions, smart_texture_dimensions, texture_cache_key,
-        zoom_pan_for_cursor, zoom_step, ZoomMode,
+        texture_cache_key, zoom_pan_for_cursor, zoom_step, ZoomMode,
     };
     use crate::window::{
         is_fullscreen, mark_native_maximized, native_snap_style, snap_action, snap_rect, Rect,
@@ -55,31 +54,21 @@ mod tests {
     }
 
     #[test]
-    fn smart_downscaling_caps_texture_to_two_viewport_dimensions() {
-        assert_eq!(
-            smart_texture_dimensions((8000, 6000), (1920, 1080)),
-            (3840, 2880)
-        );
-        assert_eq!(
-            smart_texture_dimensions((1200, 800), (1920, 1080)),
-            (1200, 800)
-        );
-    }
-
-    #[test]
-    fn prefetch_texture_dimensions_match_the_viewport_budget() {
-        assert_eq!(
-            prefetch_texture_dimensions((8000, 6000), (1920, 1080)),
-            (3840, 2880)
-        );
-    }
-
-    #[test]
     fn prepared_texture_contains_viewport_bounded_rgba_pixels() {
         let image = image::DynamicImage::new_rgba8(8000, 6000);
-        let prepared = crate::viewer::prepare_texture(&image, (1920, 1080));
-        assert_eq!(prepared.size, (3840, 2880));
-        assert_eq!(prepared.rgba.len(), 3840 * 2880 * 4);
+        let prepared = crate::viewer::prepare_texture(&image);
+        assert_eq!(prepared.size, (8000, 6000));
+        assert_eq!(prepared.rgba.len(), 8000 * 6000 * 4);
+    }
+
+    #[test]
+    fn prepared_texture_uses_actual_dimensions_after_aspect_ratio_resize() {
+        let image = image::DynamicImage::new_rgba8(65, 31);
+        let prepared = crate::viewer::prepare_texture(&image);
+        assert_eq!(
+            prepared.rgba.len(),
+            prepared.size.0 as usize * prepared.size.1 as usize * 4
+        );
     }
 
     #[test]
@@ -113,11 +102,11 @@ mod tests {
     }
 
     #[test]
-    fn texture_cache_key_changes_with_viewport() {
+    fn texture_cache_key_is_stable_without_downscale() {
         let path = std::path::Path::new("photo.jpg");
-        assert_ne!(
-            texture_cache_key(path, (1920, 1080)),
-            texture_cache_key(path, (1280, 720))
+        assert_eq!(
+            texture_cache_key(path),
+            texture_cache_key(path)
         );
     }
 

@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use image::{DynamicImage, GenericImageView, ImageReader};
+use image::{DynamicImage, ImageReader};
 use thiserror::Error;
 
 use crate::{archive, media};
@@ -37,29 +37,8 @@ pub enum ZoomMode {
 
 pub const ZOOM_STEP: f32 = 0.25;
 
-pub fn smart_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u32, u32) {
-    let (width, height) = native;
-    let max_texture_dimension = u64::from(viewport.0.max(viewport.1)).saturating_mul(2);
-    let native_dimension = u64::from(width.max(height));
-    if native_dimension <= max_texture_dimension || max_texture_dimension == 0 {
-        return native;
-    }
-    let scaled_width = (u64::from(width) * max_texture_dimension / native_dimension).max(1);
-    let scaled_height = (u64::from(height) * max_texture_dimension / native_dimension).max(1);
-    (scaled_width as u32, scaled_height as u32)
-}
-
-pub fn prefetch_texture_dimensions(native: (u32, u32), viewport: (u32, u32)) -> (u32, u32) {
-    smart_texture_dimensions(native, viewport)
-}
-
-pub fn texture_cache_key(source: &Path, viewport: (u32, u32)) -> PathBuf {
-    PathBuf::from(format!(
-        "{}#viewport:{}x{}",
-        source.display(),
-        viewport.0,
-        viewport.1
-    ))
+pub fn texture_cache_key(source: &Path) -> PathBuf {
+    source.to_path_buf()
 }
 
 pub fn load_elapsed_ms(start: Instant, end: Instant) -> u128 {
@@ -127,20 +106,11 @@ pub struct PreparedTexture {
     pub rgba: Vec<u8>,
 }
 
-pub fn prepare_texture(image: &DynamicImage, viewport: (u32, u32)) -> PreparedTexture {
-    let dimensions = prefetch_texture_dimensions(image.dimensions(), viewport);
-    let texture = if dimensions != image.dimensions() {
-        image.resize(
-            dimensions.0,
-            dimensions.1,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        image.clone()
-    };
+pub fn prepare_texture(image: &DynamicImage) -> PreparedTexture {
+    let rgba_image = image.to_rgba8();
     PreparedTexture {
-        size: dimensions,
-        rgba: texture.to_rgba8().into_raw(),
+        size: rgba_image.dimensions(),
+        rgba: rgba_image.into_raw(),
     }
 }
 
@@ -332,20 +302,17 @@ pub fn load_image_async_with_password(
     path: PathBuf,
     password: Option<String>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
-    load_image_async_with_password_for_viewport(path, password, None)
+    load_image_async_with_prepared_texture(path, password)
 }
 
-pub fn load_image_async_with_password_for_viewport(
+pub fn load_image_async_with_prepared_texture(
     path: PathBuf,
     password: Option<String>,
-    viewport: Option<(u32, u32)>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let result = load_path_with_password(path, password.as_deref()).map(|mut image| {
-            if let Some(viewport) = viewport {
-                image.prepared_texture = Some(prepare_texture(&image.image, viewport));
-            }
+            image.prepared_texture = Some(prepare_texture(&image.image));
             image
         });
         let _ = sender.send(result);
@@ -358,14 +325,13 @@ pub fn load_archive_entry_async(
     entry: archive::ArchiveEntry,
     password: Option<String>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
-    load_archive_entry_async_for_viewport(path, entry, password, None)
+    load_archive_entry_async_with_prepared_texture(path, entry, password)
 }
 
-pub fn load_archive_entry_async_for_viewport(
+pub fn load_archive_entry_async_with_prepared_texture(
     path: PathBuf,
     entry: archive::ArchiveEntry,
     password: Option<String>,
-    viewport: Option<(u32, u32)>,
 ) -> Receiver<Result<LoadedImage, ViewerError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -382,9 +348,7 @@ pub fn load_archive_entry_async_for_viewport(
                 })
             })
             .map(|mut image| {
-                if let Some(viewport) = viewport {
-                    image.prepared_texture = Some(prepare_texture(&image.image, viewport));
-                }
+                image.prepared_texture = Some(prepare_texture(&image.image));
                 image
             });
         let _ = sender.send(result);

@@ -21,9 +21,9 @@ use widno::{
     settings::{Settings, IMAGE_FORMATS},
     viewer::{
         is_supported_image_path, load_pdf_page_async, next_index, pan_for_drag, pan_for_resize,
-        reset_view, load_elapsed_ms, load_archive_entry_async_for_viewport,
-        load_image_async_with_password_for_viewport, prefetch_texture_dimensions,
-        texture_cache_key, zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
+        reset_view, load_elapsed_ms, load_archive_entry_async_with_prepared_texture,
+        load_image_async_with_prepared_texture, texture_cache_key, zoom_pan_for_cursor, zoom_step,
+        LoadedImage, ViewerError,
     },
     window::{mark_native_maximized, native_snap_style},
 };
@@ -332,11 +332,7 @@ impl WidnoApp {
         self.loading = if image_cached {
             None
         } else {
-            Some(load_image_async_with_password_for_viewport(
-                path,
-                password,
-                self.viewport_hint(),
-            ))
+            Some(load_image_async_with_prepared_texture(path, password))
         };
         self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
@@ -369,21 +365,14 @@ impl WidnoApp {
         self.loading = if image_cached {
             None
         } else {
-            Some(load_archive_entry_async_for_viewport(
+            Some(load_archive_entry_async_with_prepared_texture(
                 path,
                 entry,
                 self.archive_password.clone(),
-                self.viewport_hint(),
             ))
         };
         self.loading_started_at = Some(Instant::now());
         self.last_input = Instant::now();
-    }
-
-    fn viewport_hint(&self) -> Option<(u32, u32)> {
-        self.last_viewport_size
-            .map(|size| (size.x.max(1.0) as u32, size.y.max(1.0) as u32))
-            .or(Some((1920, 1080)))
     }
 
     fn request_pdf_page(&mut self, path: PathBuf, page: usize) {
@@ -410,11 +399,10 @@ impl WidnoApp {
                 let key = PathBuf::from(format!("{}::{}", path.display(), entry.name));
                 if self.image_cache.get(&key).is_none() {
                     self.prefetch_key = Some(key);
-                    self.prefetch_loading = Some(load_archive_entry_async_for_viewport(
+                    self.prefetch_loading = Some(load_archive_entry_async_with_prepared_texture(
                         path,
                         entry,
                         self.archive_password.clone(),
-                        self.viewport_hint(),
                     ));
                 }
             }
@@ -424,11 +412,8 @@ impl WidnoApp {
             if let Some(path) = self.siblings.get(index).cloned() {
                 if self.image_cache.get(&path).is_none() {
                     self.prefetch_key = Some(path.clone());
-                    self.prefetch_loading = Some(load_image_async_with_password_for_viewport(
-                        path,
-                        None,
-                        self.viewport_hint(),
-                    ));
+                    self.prefetch_loading =
+                        Some(load_image_async_with_prepared_texture(path, None));
                 }
             }
         }
@@ -479,9 +464,7 @@ impl WidnoApp {
     }
 
     fn texture_for_image(&mut self, ctx: &egui::Context, image: &LoadedImage) -> TextureHandle {
-        let viewport = ctx.screen_rect().size();
-        let viewport_key = (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32);
-        let texture_key = texture_cache_key(&image.source, viewport_key);
+        let texture_key = texture_cache_key(&image.source);
         if let Some(texture) = self.cached_texture(&texture_key) {
             return texture;
         }
@@ -491,19 +474,7 @@ impl WidnoApp {
                 prepared.rgba.as_slice(),
             )
         } else {
-            let native_dimensions = (image.image.width(), image.image.height());
-            let texture_dimensions =
-                prefetch_texture_dimensions(native_dimensions, viewport_key);
-            let texture_image = if texture_dimensions != native_dimensions {
-                image.image.resize(
-                    texture_dimensions.0,
-                    texture_dimensions.1,
-                    image::imageops::FilterType::Triangle,
-                )
-            } else {
-                image.image.as_ref().clone()
-            };
-            let rgba = texture_image.to_rgba8();
+            let rgba = image.image.to_rgba8();
             let size = [rgba.width() as usize, rgba.height() as usize];
             let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
             let texture = ctx.load_texture(
