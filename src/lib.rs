@@ -224,7 +224,7 @@ mod tests {
                 .join("ci.yml"),
         )
         .expect("CI workflow");
-        assert!(workflow.contains("choco install innosetup --version=6.7.3"));
+        assert!(workflow.contains("choco install innosetup --version=6.7.1"));
     }
 
     #[test]
