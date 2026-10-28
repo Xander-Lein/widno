@@ -54,11 +54,13 @@ try {
         @{ Expression = { ($_.Rect.Right - $_.Rect.Left) * ($_.Rect.Bottom - $_.Rect.Top) } } `
         -Descending | Select-Object -First 1
     $rect = $window.Rect
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $dpiTolerance = 32
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
-    if ($width -lt ($screen.Width - 2) -or $height -lt ($screen.Height - 2)) {
-        throw "Window is not fullscreen: ${width}x${height}, expected $($screen.Width)x$($screen.Height)"
+    if ([math]::Abs($width - $screen.Width) -gt $dpiTolerance `
+        -or [math]::Abs($height - $screen.Height) -gt $dpiTolerance) {
+        throw "Window does not fill the working area: ${width}x${height}, expected $($screen.Width)x$($screen.Height), dpi tolerance=$dpiTolerance"
     }
 
     Write-Output "GUI smoke passed: window handle=$($process.MainWindowHandle), size=${width}x${height}"

@@ -1,5 +1,5 @@
 #define AppName "Widno"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 #define AppPublisher "Xander-Lein"
 #define AppURL "https://github.com/Xander-Lein/widno"
 #define AppExeName "widno.exe"

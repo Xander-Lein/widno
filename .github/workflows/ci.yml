@@ -1,0 +1,50 @@
+name: Widno CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  windows-quality:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-gnu
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --version=6.7.1 --no-progress --yes
+
+      - name: Build installer
+        shell: powershell
+        run: .\scripts\build-installer.ps1 -Iscc "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Widno-Windows-x64-Installer
+          path: dist/Widno-*-Windows-x64-Setup.exe

@@ -93,10 +93,26 @@ pub fn pan_for_resize(
     previous_viewport: (f32, f32),
     new_viewport: (f32, f32),
 ) -> (f32, f32) {
-    (
-        pan.0 + (previous_viewport.0 - new_viewport.0) / 2.0,
-        pan.1 + (previous_viewport.1 - new_viewport.1) / 2.0,
-    )
+    let scale = resize_scale_factor(previous_viewport, new_viewport);
+    pan_for_resize_scale(pan, 1.0, scale)
+}
+
+pub fn pan_for_resize_scale(pan: (f32, f32), previous_scale: f32, new_scale: f32) -> (f32, f32) {
+    let ratio = new_scale / previous_scale.max(0.0001);
+    (pan.0 * ratio, pan.1 * ratio)
+}
+
+pub fn resize_scale_factor(previous_viewport: (f32, f32), new_viewport: (f32, f32)) -> f32 {
+    if previous_viewport.0 <= 0.0
+        || previous_viewport.1 <= 0.0
+        || new_viewport.0 <= 0.0
+        || new_viewport.1 <= 0.0
+    {
+        return 1.0;
+    }
+    (new_viewport.0 / previous_viewport.0)
+        .min(new_viewport.1 / previous_viewport.1)
+        .clamp(0.05, 20.0)
 }
 
 pub fn reset_view() -> ((f32, f32), f32) {

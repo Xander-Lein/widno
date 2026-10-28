@@ -1,6 +1,6 @@
 [package]
 name = "widno"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "A fast, minimal Windows image viewer inspired by FSMaxView"
 license = "MIT"

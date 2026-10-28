@@ -22,8 +22,8 @@ use widno::{
     viewer::{
         is_supported_image_path, load_archive_entry_async_with_prepared_texture_and_cancel,
         load_elapsed_ms, load_image_async_with_prepared_texture_and_cancel, load_pdf_page_async,
-        next_index, pan_for_drag, pan_for_resize, reset_view, texture_cache_key,
-        zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
+        next_index, pan_for_drag, pan_for_resize_scale, reset_view, resize_scale_factor,
+        texture_cache_key, zoom_pan_for_cursor, zoom_step, LoadedImage, ViewerError,
     },
     window::{mark_native_maximized, native_snap_style},
 };
@@ -192,6 +192,7 @@ struct WidnoApp {
     exif: Vec<(String, String)>,
     show_exif: bool,
     zoom: f32,
+    viewport_scale: f32,
     fit_to_window: bool,
     pan: Vec2,
     drag_start_pan: Vec2,
@@ -203,9 +204,11 @@ struct WidnoApp {
     prefetch_loading: Option<Receiver<Result<LoadedImage, ViewerError>>>,
     prefetch_cancel: Option<Arc<AtomicBool>>,
     prefetch_key: Option<PathBuf>,
+    pending_load_timing: Option<PathBuf>,
     startup_maximized: bool,
     native_snap_configured: bool,
     last_viewport_size: Option<Vec2>,
+    reference_viewport_size: Option<Vec2>,
 }
 
 impl WidnoApp {
@@ -236,6 +239,7 @@ impl WidnoApp {
             exif: Vec::new(),
             show_exif: false,
             zoom: 1.0,
+            viewport_scale: 1.0,
             fit_to_window: true,
             pan: Vec2::ZERO,
             drag_start_pan: Vec2::ZERO,
@@ -247,9 +251,11 @@ impl WidnoApp {
             prefetch_loading: None,
             prefetch_cancel: None,
             prefetch_key: None,
+            pending_load_timing: None,
             startup_maximized: true,
             native_snap_configured: false,
             last_viewport_size: None,
+            reference_viewport_size: None,
         };
 
         if let Some(path) = std::env::args_os().nth(1) {
@@ -554,6 +560,7 @@ impl WidnoApp {
         self.image_cache
             .insert(image.source.clone(), image.image.clone());
         self.image = Some(image);
+        self.viewport_scale = 1.0;
         self.fit_to_window = true;
         if let Some(entries) = archive_entries {
             self.archive_entries = entries;
@@ -569,7 +576,7 @@ impl WidnoApp {
         }
         self.start_exif_load();
         self.start_prefetch();
-        self.record_load_timing(&timing_source);
+        self.pending_load_timing = Some(timing_source);
     }
 
     fn record_load_timing(&mut self, source: &Path) {
@@ -685,14 +692,19 @@ impl WidnoApp {
         let mut navigation = 0;
         let mut save_requested = false;
         let viewport = ctx.screen_rect().size();
+        if self.reference_viewport_size.is_none() {
+            self.reference_viewport_size = Some(viewport);
+        }
         if let Some(previous) = self.last_viewport_size {
             if !self.fit_to_window && (previous - viewport).length_sq() > f32::EPSILON {
-                let pan = pan_for_resize(
-                    (self.pan.x, self.pan.y),
-                    (previous.x, previous.y),
-                    (viewport.x, viewport.y),
-                );
+                let new_viewport = (viewport.x, viewport.y);
+                let reference = self.reference_viewport_size.unwrap_or(previous);
+                let reference_viewport = (reference.x, reference.y);
+                let new_scale = resize_scale_factor(reference_viewport, new_viewport);
+                let pan =
+                    pan_for_resize_scale((self.pan.x, self.pan.y), self.viewport_scale, new_scale);
                 self.pan = Vec2::new(pan.0, pan.1);
+                self.viewport_scale = new_scale;
             }
         }
         self.last_viewport_size = Some(viewport);
@@ -704,6 +716,7 @@ impl WidnoApp {
             // never transitions it back to an inconsistent fullscreen state.
             if input.modifiers.ctrl && input.key_pressed(Key::Num0) {
                 self.fit_to_window = true;
+                self.viewport_scale = 1.0;
                 let (pan, zoom) = reset_view();
                 self.pan = Vec2::new(pan.0, pan.1);
                 self.zoom = zoom;
@@ -839,7 +852,7 @@ impl WidnoApp {
                 .min(1.0);
             Some(native * scale.max(0.01))
         } else {
-            Some(native * self.zoom)
+            Some(native * self.zoom * self.viewport_scale)
         }
     }
 
@@ -901,6 +914,9 @@ impl WidnoApp {
 
 impl App for WidnoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        if let Some(source) = self.pending_load_timing.take() {
+            self.record_load_timing(&source);
+        }
         self.poll_image(ctx);
         if !self.native_snap_configured {
             configure_native_snap_window();

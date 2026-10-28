@@ -19,8 +19,9 @@ mod tests {
     use crate::formats::context_extensions;
     use crate::metadata::{format_metadata, HEADER_HEIGHT};
     use crate::viewer::{
-        is_supported_image_path, next_index, pan_for_drag, pan_for_resize, reset_view,
-        texture_cache_key, zoom_pan_for_cursor, zoom_step, ZoomMode,
+        is_supported_image_path, next_index, pan_for_drag, pan_for_resize, pan_for_resize_scale,
+        reset_view, resize_scale_factor, texture_cache_key, zoom_pan_for_cursor, zoom_step,
+        ZoomMode,
     };
     use crate::window::{
         is_fullscreen, mark_native_maximized, native_snap_style, snap_action, snap_rect, Rect,
@@ -128,6 +129,132 @@ mod tests {
         assert!(installer.contains("FinishedLabel="));
         assert!(installer.contains("Open with Widno"));
         assert!(installer.contains("default"));
+    }
+
+    #[test]
+    fn first_load_benchmark_script_uses_release_timing_contract() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("benchmark-first-load.ps1"),
+        )
+        .expect("first-load benchmark script");
+        assert!(script.contains("WIDNO_LOAD_TIMING"));
+        assert!(script.contains("Wait-Process"));
+        assert!(script.contains("widno-load-times.csv"));
+        assert!(script.contains("Split-Path"));
+        assert!(script.contains("$Runs"));
+    }
+
+    #[test]
+    fn first_load_benchmark_quotes_paths_for_process_arguments() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("benchmark-first-load.ps1"),
+        )
+        .expect("first-load benchmark script");
+        assert!(script.contains("ArgumentList @(\"`\"$resolvedPath`\"\")"));
+    }
+
+    #[test]
+    fn association_smoke_script_checks_context_menu_without_defaults() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("association-smoke.ps1"),
+        )
+        .expect("association smoke script");
+        assert!(script.contains("Open with Widno"));
+        assert!(script.contains("SystemFileAssociations"));
+        assert!(script.contains("Directory\\shell"));
+        assert!(script.contains("UserChoice"));
+        assert!(script.contains("OpenWithProgids"));
+    }
+
+    #[test]
+    fn association_smoke_covers_every_registered_extension() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("association-smoke.ps1"),
+        )
+        .expect("association smoke script");
+        for extension in context_extensions() {
+            assert!(
+                script.contains(&format!("'{extension}'")),
+                "association smoke is missing {extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_smoke_uses_working_area_when_taskbar_is_visible() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("gui-smoke.ps1"),
+        )
+        .expect("GUI smoke script");
+        assert!(script.contains("WorkingArea"));
+        assert!(script.contains("dpi tolerance"));
+    }
+
+    #[test]
+    fn ci_workflow_runs_windows_quality_gates() {
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(".github")
+                .join("workflows")
+                .join("ci.yml"),
+        )
+        .expect("CI workflow");
+        assert!(workflow.contains("windows-latest"));
+        assert!(workflow.contains("cargo test --locked"));
+        assert!(workflow.contains("cargo clippy"));
+        assert!(workflow.contains("cargo build --release --locked"));
+    }
+
+    #[test]
+    fn ci_pins_inno_setup_version() {
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(".github")
+                .join("workflows")
+                .join("ci.yml"),
+        )
+        .expect("CI workflow");
+        assert!(workflow.contains("choco install innosetup --version=6.7.1"));
+    }
+
+    #[test]
+    fn build_script_leaves_resource_linking_to_winres() {
+        let build_script =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+                .expect("build script");
+        assert!(build_script.contains("resource.compile()"));
+        assert!(!build_script.contains("rustc-link-arg"));
+    }
+
+    #[test]
+    fn build_script_does_not_override_windows_resource_toolchain() {
+        let build_script =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+                .expect("build script");
+        assert!(!build_script.contains("set_toolkit_path"));
+    }
+
+    #[test]
+    fn performance_report_records_rejected_wic_and_downscale() {
+        let report = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("performance-baseline.md"),
+        )
+        .expect("performance report");
+        assert!(report.contains("WIC"));
+        assert!(report.contains("Smart Downscaling"));
+        assert!(report.contains("удалён"));
     }
 
     #[test]
@@ -367,10 +494,51 @@ mod tests {
 
     #[test]
     fn resize_preserves_the_image_point_at_the_viewport_center() {
+        let pan = pan_for_resize((120.0, -40.0), (1920.0, 1080.0), (1280.0, 720.0));
+        assert!((pan.0 - 80.0).abs() < f32::EPSILON);
+        assert!((pan.1 + 26.666668).abs() < 0.00001);
+    }
+
+    #[test]
+    fn resize_scales_the_fullscreen_composition_into_a_smaller_viewport() {
+        assert_eq!(resize_scale_factor((1920.0, 1080.0), (960.0, 540.0)), 0.5);
         assert_eq!(
-            pan_for_resize((120.0, -40.0), (1920.0, 1080.0), (1280.0, 720.0)),
-            (440.0, 140.0)
+            pan_for_resize((120.0, -40.0), (1920.0, 1080.0), (960.0, 540.0)),
+            (60.0, -20.0)
         );
+    }
+
+    #[test]
+    fn resize_does_not_change_logical_zoom() {
+        let zoom = 2.0;
+        let scale = resize_scale_factor((1920.0, 1080.0), (960.0, 540.0));
+        assert_eq!(zoom, 2.0);
+        assert_eq!(zoom * scale, 1.0);
+    }
+
+    #[test]
+    fn resize_uses_stable_fullscreen_scale_after_intermediate_snaps() {
+        let corner_scale = resize_scale_factor((1920.0, 1080.0), (960.0, 540.0));
+        let restored_pan = pan_for_resize_scale(
+            pan_for_resize_scale((120.0, -40.0), 1.0, corner_scale),
+            corner_scale,
+            1.0,
+        );
+        assert_eq!(corner_scale, 0.5);
+        assert_eq!(restored_pan, (120.0, -40.0));
+    }
+
+    #[test]
+    fn load_timing_is_deferred_until_the_next_gui_frame() {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("main.rs"),
+        )
+        .expect("main source");
+        assert!(source.contains("pending_load_timing: Option<PathBuf>"));
+        assert!(source.contains("self.pending_load_timing.take()"));
+        assert!(source.contains("self.pending_load_timing = Some(timing_source)"));
     }
 
     #[test]
