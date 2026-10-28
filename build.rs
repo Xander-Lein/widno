@@ -10,11 +10,5 @@ fn main() {
         }
         resource.set_icon("assets/widno-icon.ico");
         resource.compile().expect("embed Widno Windows icon");
-        println!(
-            "cargo:rustc-link-arg={}",
-            std::path::Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"))
-                .join("resource.o")
-                .display()
-        );
     }
 }

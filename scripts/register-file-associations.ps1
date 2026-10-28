@@ -90,7 +90,7 @@ foreach ($extension in $contextExtensions) {
 $directoryShell = Join-Path $classesRoot 'Directory\shell'
 $oldFolderVerb = Join-Path $directoryShell 'Browse with Widno'
 Remove-Item -LiteralPath $oldFolderVerb -Recurse -Force -ErrorAction SilentlyContinue
-Add-OpenWithVerb $directoryShell
+Add-OpenWithVerb (Join-Path $classesRoot 'Directory')
 
 Remove-Item -LiteralPath (Join-Path $classesRoot 'Widno.ImageFile') `
     -Recurse -Force -ErrorAction SilentlyContinue

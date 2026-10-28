@@ -1,4 +1,4 @@
-# Widno 1.0.1
+# Widno 1.0.2
 
 ![Widno icon](assets/widno-icon.png)
 
@@ -12,7 +12,7 @@
 ## Скачать
 
 Откройте страницу [Releases](https://github.com/Xander-Lein/widno/releases) и
-скачайте `Widno-1.0.1-Windows-x64-Setup.exe`.
+скачайте `Widno-1.0.2-Windows-x64-Setup.exe`.
 
 Установщик рассчитан на Windows 10/11 x64. Исходники доступны через кнопку
 `Source code (zip)` на странице релиза.
@@ -82,11 +82,13 @@ cargo build --release --locked
 .\scripts\build-installer.ps1
 ```
 
+Измерение времени первого кадра описано в
+[`docs/performance-baseline.md`](docs/performance-baseline.md).
+
 ## Ограничения
 
 RAW preview использует безопасный fallback без полноценного demosaicing.
-Пароли архивов доступны через API; интерактивное окно ввода пароля ещё не
-включено.
+Для защищённых архивов доступно интерактивное поле ввода пароля.
 
 ## English
 
@@ -94,7 +96,7 @@ Widno is a compact, fast Windows x64 image viewer written in Rust. It provides
 a borderless UI, native Windows Snap support, folder navigation, archive image
 browsing, zoom/pan, metadata, export, and a RAM-only LRU cache.
 
-Download `Widno-1.0.1-Windows-x64-Setup.exe` from
+Download `Widno-1.0.2-Windows-x64-Setup.exe` from
 [GitHub Releases](https://github.com/Xander-Lein/widno/releases). The GitHub
 release page also provides the automatically generated `Source code (zip)`.
 
