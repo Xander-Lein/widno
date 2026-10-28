@@ -237,6 +237,14 @@ mod tests {
     }
 
     #[test]
+    fn build_script_does_not_override_windows_resource_toolchain() {
+        let build_script =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+                .expect("build script");
+        assert!(!build_script.contains("set_toolkit_path"));
+    }
+
+    #[test]
     fn performance_report_records_rejected_wic_and_downscale() {
         let report = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
